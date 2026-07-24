@@ -1,0 +1,44 @@
+seed: 0
+
+paths:
+  project_root: ..
+  artifacts: ../artifacts
+  coco_images: ../datasets/coco/val2017
+  coco_annotations: ../datasets/coco/annotations/instances_val2017.json
+  kitti_tracking: ../datasets/KITTI
+  mot17: /home/wcho/tmp_SwapPatch/data/MOT17
+  sam3_python: ../.conda-envs/kds-sam3/bin/python
+  sam3_repo: ../third_party/sam3
+  sam3_checkpoint: ../weights/sam3/sam3.pt
+  sam3_bpe: ../third_party/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  bytetrack_repo: /home/wcho/ByteTrack
+  boxmot_repo: /home/wcho/boxmot
+  trackeval_repo: /home/wcho/BankTweak/TrackEval
+  coco_pretrained_yolox_x: /home/wcho/ByteTrack/pretrained/yolox_x.pth
+
+classes:
+  # Contiguous ids used by the Phase-1 YOLOX head.
+  names: [car, truck, person, bicycle]
+  kitti_map:
+    Car: car
+    Van: car
+    Truck: truck
+    Tram: truck
+    Pedestrian: person
+    Person_sitting: person
+    Cyclist: bicycle
+  coco_map:
+    car: car
+    truck: truck
+    bus: truck
+    person: person
+    bicycle: bicycle
+    motorcycle: bicycle
+
+# 2026-07-23: truck AND bicycle excluded from the OCCLUDER pool (KITTI data
+# scarcity: 0 truck and only 1 bicycle tracklet with a >=30-frame clean sub-run).
+# The YOLOX head stays 4-class for eval; only pasted occluders are 2-class
+# (car/person). car folds in KITTI Van via classes.*_map.
+occluder_class_dist:
+  car: 0.65
+  person: 0.35

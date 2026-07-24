@@ -1,0 +1,8 @@
+envs_dirs:
+  - /home/wcho/Occlusion_renderer/.conda-envs
+pkgs_dirs:
+  - /home/wcho/Occlusion_renderer/.conda-pkgs
+channels:
+  - defaults
+channel_priority: flexible
+

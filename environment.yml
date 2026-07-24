@@ -1,0 +1,8 @@
+name: kds-occlusion
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip>=24
+  - setuptools>=68
+  - wheel

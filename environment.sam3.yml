@@ -1,0 +1,19 @@
+prefix: /home/wcho/Occlusion_renderer/.conda-envs/kds-sam3
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pip>=25
+  # SAM3 currently imports pkg_resources, removed from newer setuptools.
+  - setuptools>=75,<81
+  - wheel
+  - pip:
+      - Pillow>=10,<12
+      - PyYAML>=6,<7
+      - tqdm>=4.66,<5
+      - einops>=0.8,<1
+      - pycocotools>=2.0.7,<3
+      - psutil>=6,<8
+      # KITTI SAM3 track visualization MP4 encoding (no GUI dependencies).
+      # OpenCV 4.12+ requires NumPy 2, while the official SAM3 stack pins <2.
+      - opencv-python-headless==4.10.0.84

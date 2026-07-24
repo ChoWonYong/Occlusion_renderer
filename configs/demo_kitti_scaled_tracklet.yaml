@@ -1,0 +1,9 @@
+base: phase1_kitti.yaml
+
+# One-sequence visual validation of KITTI-statistics-based person scaling.
+tracklet_synthesis:
+  output_dir: ../artifacts/phase1/tracklet_scaled_demo
+  max_sequences: 1
+  tracklets_per_sequence: [1, 1]
+  boundary_shift_count: 0
+  placement_mode: source_coordinates

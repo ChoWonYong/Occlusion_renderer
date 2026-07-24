@@ -1,0 +1,189 @@
+base: base.yaml
+
+phase: phase1_kitti
+
+split:
+  train_sequences: ["0005", "0010", "0014", "0015", "0016", "0000", "0001", "0002", "0003", "0004", "0006", "0007"]
+  eval_sequences: ["0008", "0009", "0011", "0012", "0013", "0017", "0018", "0019", "0020"]
+  output: ../artifacts/phase1/split.json
+
+pool:
+  output_dir: ../artifacts/phase1/occluder_pool
+  source: coco_gt
+  min_area: 256
+  samples_per_class: 200
+
+kitti_sam3_pool:
+  output_dir: ../artifacts/phase1/kitti_sam3_occluder_pool
+  max_occlusion: 0
+  max_truncation: 0.2
+  min_bbox_area: 400
+  min_mask_area: 128
+  context_padding: 0.25
+  confidence_threshold: 0.5
+  min_gt_iou: 0.3
+  max_instances: 800
+  device: cuda
+  precision: auto
+  # --- 2026-07-23 KITTI multi-class tracklet pool (Step 3) ---
+  # KITTI Tracking is 10 fps, so target==source and every frame is a sample:
+  # a tracklet is a maximal run of clean (occlusion<=max, truncation<=max)
+  # consecutive frames for one track id, length in [min_frames, max_frames].
+  tracklet_output_dir: ../artifacts/phase1/kitti_sam3_tracklets
+  target_fps: 10
+  min_frames: 30
+  max_frames: 100
+  max_tracklets: 200
+  max_per_identity: 2
+  # Prompt follows the native KITTI class while output category follows classes.kitti_map.
+  # 2026-07-23: Truck/Tram AND Cyclist intentionally omitted -> no truck or bicycle
+  # occluders are extracted (data scarcity). This only affects the occluder pool;
+  # classes.kitti_map keeps Truck/Tram->truck and Cyclist->bicycle for detector
+  # training/eval GT (head stays 4-class). The already-built pool's 1 bicycle
+  # tracklet is inert because class_ratio no longer requests bicycle.
+  prompts:
+    Car: car
+    Van: van
+    Pedestrian: human
+    Person_sitting: human
+
+tracklet_pool:
+  output_dir: ../artifacts/phase1/mot17_sam3_tracklets
+  detector: FRCNN
+  visibility_min: 0.8
+  # --- 2026-07-23 confirmed FPS-aware variable-length policy ---
+  # Length is measured in target-FPS frames. min 30 (=3s @10FPS), no upper cap
+  # (naturally bounded by the source run length). Presence forms continuous runs;
+  # visibility >= 0.8 is checked only on the resampled (target-FPS) frames, and a
+  # failing sample is substituted with an adjacent frame within the window.
+  target_fps: 10
+  min_frames: 30
+  # 2026-07-23: capped at 100 target frames (=10s) so a single long occluder can
+  # not dominate a short KITTI sequence; longer runs are truncated to the first 100.
+  max_frames: 100
+  visibility_substitution_window: 1
+  # Cap tracklets per source identity to avoid over-representing one person.
+  max_per_identity: 2
+  # Legacy strict-window keys kept for the old fixed-length path / inventory.
+  length: 30
+  stride: 30
+  max_tracklets: 200
+  min_mask_area: 128
+  sam3_text_prompt: human
+  sam3_confidence_threshold: 0.5
+  sam3_min_gt_iou: 0.3
+  sam3_context_padding: 0.2
+  device: cuda
+  # auto selects FP16 on V100 (sm_70), BF16 on Ampere or newer.
+  sam3_precision: auto
+
+tracklet_synthesis:
+  output_dir: ../artifacts/phase1/tracklet_synthetic
+  max_sequences: 12
+  # --- 2026-07-23 confirmed scheduling / occlusion policy (Steps 4-6) ---
+  target_fps: 10
+  tracklet_min_frames: 30            # min 30 (=3s), variable upper length
+  # Paste exposure L ~ uniform[30, len(tracklet)] using the first L frames.
+  paste_exposure_frames: uniform_30_to_len
+  # Event density scales with sequence length; capped by distinct victim tracks.
+  victim_events_per_100_frames: 3.0
+  cap_events_to_distinct_victims: true
+  one_event_per_victim: true
+  victim_tracklet_assignment: random
+  max_concurrent_occluders: 2
+  double_occluder_probability: 0.15
+  boundary_events_are_auxiliary: true
+  effective_event_frames: [8, 20]    # rho >= 0.1 run length
+  peak_rho_max: 0.80                  # reject/resample above
+  peak_rho_distribution:
+    mild: 0.20                        # band 0.20-0.35
+    moderate: 0.55                    # band 0.35-0.65
+    heavy: 0.25                       # band 0.65-0.80
+  rho_method: bbox_proxy              # victim uses bbox as amodal proxy (no SAM3)
+  # truck AND bicycle excluded from occluder pool (KITTI data scarcity); head stays 4-class.
+  class_ratio: {car: 0.65, person: 0.35}
+  victim_detector_bbox_policy: amodal_original
+  # --- 2026-07-23 victim-relative sizing (Step 5) ---
+  # occluder target height = victim_height * (factor[occluder]/factor[victim]).
+  # Canonical heights relative to car=1.0; truck is victim-side only.
+  scale_mode: victim_relative
+  class_height_factor: {car: 1.0, truck: 1.8, person: 1.2, bicycle: 0.9}
+  # placement nudges scale within these multipliers of the canonical height to
+  # reach the target peak rho while staying realistic.
+  scale_search_multipliers: [0.80, 0.90, 1.00, 1.15, 1.30]
+  event_end_rho_max: 0.05             # rho at the event's first/last frame
+  # --- legacy demo/smoke keys (still consumed until Steps 4-6 land) ---
+  tracklets_per_sequence: [2, 4]
+  # CCP-style boundary exceptions are capped at two (left and right).
+  boundary_shift_count: 2
+  boundary_visible_fraction: 0.6
+  position_mode: normalized_source
+  # NOTE: scale_mode is set once above to victim_relative (Step 5). The old
+  # kitti_person_bbox_height_mean_std path is retired; these reference keys are
+  # kept only for the deprecated legacy demo pipeline.
+  scale_stddevs: 1.0
+  scale_reference_max_occlusion: 0
+  scale_reference_max_truncation: 0.2
+  # Preserve the relative trajectory; apply one constant translation selected to
+  # hit the target peak rho against one clean KITTI victim track.
+  placement_mode: victim_overlap_translation
+  victim_anchor_offset: 15
+  victim_min_area: 400
+  victim_max_base_occlusion: 0
+  paste_order: large_first
+  # Hard paste is the experiment default. Alpha blending is intentionally deferred.
+  blend_method: none
+
+synthesis:
+  output_dir: ../artifacts/phase1/synthetic
+  sequences_per_source: 1
+  max_sequences: 12
+  motion_models: [const_vel, const_accel]
+  event_duration: [16, 40]
+  scale_range: [0.60, 1.40]
+  scale_rate: [-0.002, 0.004]
+  peak_rho: [0.20, 0.70]
+  blend_methods: [none]
+  depth_mode: occluder_front
+  save_occluder_masks: false
+
+dataset:
+  output_dir: ../artifacts/phase1/yolox_data
+  synthetic_output_dir: ../artifacts/phase1/tracklet_synthetic
+  finetune_train_json: annotations/kitti_train.json
+  baseline_train_json: annotations/baseline_train.json
+  treatment_train_json: annotations/treatment_train.json
+  eval_json: annotations/eval.json
+  equal_budget_augmentation: [horizontal_flip, color_jitter]
+
+train:
+  model: yolox_x
+  exp_file: ../train/yolox_x_kitti.py
+  devices: 1
+  batch_size: 4
+  epochs: 60
+  input_size: [800, 1440]
+  fp16: true
+  # 2026-07-23: disabled — occupy_mem (-o) miscomputes free memory under parallel
+  # multi-GPU launches and crashes with a negative-dimension tensor. Pre-allocation
+  # is a perf-only optimization and not needed.
+  occupy_gpu: false
+  seeds: [0, 1, 2]
+  output_dir: ../artifacts/phase1/yolox_runs
+
+tracker:
+  implementation: boxmot
+  name: bytetrack
+  reid: false
+  frame_rate: 10
+  min_conf: 0.10
+  track_thresh: 0.45
+  match_thresh: 0.80
+  track_buffer: 30
+  per_class: true
+  output_dir: ../artifacts/phase1/tracking
+
+detector:
+  test_conf: 0.01
+  nms_thresh: 0.70
+  fp16: true

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kds-occlusion"
+version = "0.1.0"
+description = "Video occlusion synthesis, temporal labeling, and MOT evaluation pipeline"
+requires-python = ">=3.10"
+dependencies = [
+  # SAM3 pins NumPy <2 while the ByteTrack environment uses NumPy 2.x.
+  "numpy>=1.26,<3.0",
+  "Pillow>=10.0,<12.0",
+  "PyYAML>=6.0",
+]
+
+[project.scripts]
+kds-synth-a2a = "synth.pipeline:main"
+kds-kitti2coco = "data.kitti2coco:main"
+kds-phase1-split = "data.split_phase1:main"
+kds-build-pool = "pool.build_pool:main"
+kds-build-kitti-sam3-pool = "pool.build_kitti_sam3_pool:main"
+kds-build-tracklets = "pool.build_tracklet_pool:main"
+kds-sam3-smoke = "scripts.sam3_smoke:main"
+kds-kitti-sam3-smoke = "scripts.kitti_sam3_smoke:main"
+kds-kitti-sam3-track-video = "scripts.kitti_sam3_track_video:main"
+kds-render-kitti-demo = "scripts.render_kitti_demo_video:main"
+kds-visualize-tracklets = "scripts.visualize_tracklets:main"
+kds-synth-video = "synth.video_pipeline:main"
+kds-synth-tracklets = "synth.tracklet_pipeline:main"
+kds-synth-events = "synth.event_pipeline:main"
+kds-build-kitti-split = "data.build_kitti_finetune:main"
+kds-build-ab = "data.build_phase1:main"
+kds-train-yolox = "train.run:main"
+kds-eval-boxmot = "eval.run_boxmot:main"
+kds-aggregate = "eval.aggregate:main"
+
+[tool.setuptools.packages.find]
+include = ["common*", "data*", "pool*", "segment*", "depth*", "synth*", "label*", "qc*", "mining*", "train*", "eval*", "scripts*"]
