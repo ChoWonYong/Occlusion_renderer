@@ -214,5 +214,3 @@ train/{run.py, yolox_x_kitti.py} # YOLOX-X fine-tune + aug 토글
 eval/run_boxmot.py          # ByteTrack 추론 + TrackEval layout
 eval/aggregate.py           # per-class → 전체 비교표
 ```
-
-# Occlusion_renderer

@@ -4,7 +4,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from common.schema import bbox_to_mask, compute_ratio, encode_binary_mask, mask_to_bbox, occlusion_level
+from common.schema import bbox_to_mask, compute_ratio, mask_to_bbox, occlusion_level
 
 
 VALID_DETECTOR_BBOX_POLICIES = ("visible", "amodal_original")
@@ -40,10 +40,8 @@ def label_frame(
     return {
         "bbox": detector_bbox,
         "visible_bbox": visible_bbox,
-        "segmentation": encode_binary_mask(visible),
         "area": int(visible.sum()),
         "amodal_bbox": amodal_bbox,
-        "amodal_segmentation": encode_binary_mask(amodal),
         "occlusion_ratio": ratio,
         "occlusion_level": occlusion_level(ratio),
         "occluder_ids": [int(track_id) for track_id in occluder_track_ids] if ratio > 0 else [],
@@ -99,10 +97,8 @@ def label_synthetic_occluder(
     return {
         "bbox": visible_bbox,
         "visible_bbox": visible_bbox,
-        "segmentation": encode_binary_mask(visible),
         "area": int(visible.sum()),
         "amodal_bbox": mask_to_bbox(amodal),
-        "amodal_segmentation": encode_binary_mask(amodal),
         "occlusion_ratio": ratio,
         "occlusion_level": occlusion_level(ratio),
         "occluder_ids": [int(track_id) for track_id in occluder_ids] if ratio > 0 else [],

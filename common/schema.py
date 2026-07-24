@@ -109,7 +109,6 @@ def validate_extended_annotation(annotation: Mapping[str, Any]) -> None:
     required = {
         "visible_bbox",
         "amodal_bbox",
-        "amodal_segmentation",
         "occlusion_ratio",
         "occlusion_level",
         "occluder_ids",

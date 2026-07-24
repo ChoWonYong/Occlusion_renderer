@@ -49,7 +49,6 @@ class ValidateExtendedAnnotationTest(unittest.TestCase):
             "bbox": amodal if policy == "amodal_original" else visible,
             "visible_bbox": visible,
             "amodal_bbox": amodal,
-            "amodal_segmentation": {"size": [10, 10], "counts": [100]},
             "occlusion_ratio": 0.5,
             "occlusion_level": 2,
             "occluder_ids": [7],
