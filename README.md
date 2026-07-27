@@ -8,7 +8,7 @@ ByteTrack(from BoxMOT)으로 원본 KITTI eval 시퀀스에서 tracking 강건�
 
 ---
 
-## Results (KITI half train/half valid based on MOT protocol)
+## Results (KITTI half train/half valid based on MOT protocol)
 
 | Detector | HOTA | DetA | AssA | MOTA | IDF1 | 
 |---|---:|---:|---:|---:|---:|
