@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import os
 from pathlib import Path
+import re
 from typing import Any, Mapping
+
+# ``${VAR:-fallback}``, so configs can point at machine-specific locations
+# (external repos, datasets) without hardcoding one machine's layout.
+_ENV_WITH_DEFAULT = re.compile(r"\$\{(\w+):-([^{}]*)\}")
+# Bounds the repeat below in case a variable expands to another expansion.
+_MAX_EXPANSIONS = 10
 
 
 def _merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
@@ -34,8 +42,26 @@ def load_config(path: str | Path) -> tuple[dict[str, Any], Path]:
     return raw, config_path
 
 
+def expand_path_value(value: str | Path) -> str:
+    """Expand ``${VAR:-fallback}``, then plain ``$VAR``/``${VAR}``, then ``~``.
+
+    An env var that is unset *or empty* falls back, matching shell ``:-``.
+    The pattern rejects braces inside a fallback, so nested fallbacks only become
+    matchable once the inner one is gone; substitution repeats until it settles.
+    """
+    text = str(value)
+    for _ in range(_MAX_EXPANSIONS):
+        expanded = _ENV_WITH_DEFAULT.sub(
+            lambda match: os.environ.get(match.group(1)) or match.group(2), text
+        )
+        if expanded == text:
+            break
+        text = expanded
+    return os.path.expanduser(os.path.expandvars(text))
+
+
 def resolve_path(config_dir: Path, value: str | Path) -> Path:
-    path = Path(value).expanduser()
+    path = Path(expand_path_value(value))
     return path.resolve() if path.is_absolute() else (config_dir / path).resolve()
 
 

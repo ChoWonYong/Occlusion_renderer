@@ -1,4 +1,4 @@
-"""YOLOX-X experiment consumed by /home/wcho/ByteTrack/tools/train.py.
+"""YOLOX-X experiment consumed by ByteTrack's tools/train.py (paths.bytetrack_repo).
 
 Runtime values come from KDS_* environment variables set by train/run.py so the
 same Exp file is used for baseline and treatment.

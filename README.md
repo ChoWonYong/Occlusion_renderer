@@ -42,23 +42,50 @@ Bytetrack에서 언급한 MOT 내장 detector 학습 관례를 따르되, baseli
 
 ## 2. Environments
 
-두 환경을 분리합니다.
+두 환경을 분리하고, 둘 다 레포 로컬 `.conda-envs/`에 만듭니다(경로는 `.condarc`의 `envs_dirs`).
 - `kds-occlusion` — ByteTrack/YOLOX, 데이터 변환, 합성, 라벨링, 평가
 - `kds-sam3` — 공식 SAM3 추론 (Python 3.12, NumPy 1.26 계열)
 
+### 2.1 활성화 (작업할 때마다)
+
 ```bash
-cd /path/to/Occlusion_renderer
-export CONDARC=$PWD/.condarc
+source /path/to/Occlusion_renderer/scripts/activate_kds.sh   # 작업 디렉토리 무관
+```
+
+`conda activate kds-occlusion`을 그냥 실행하면 `Could not find conda environment`로 실패합니다.
+환경 경로가 레포 `.condarc`에만 선언돼 있는데 conda가 이 파일을 자동으로 읽지 않기 때문입니다.
+위 스크립트가 conda 셸 함수 로딩과 `CONDARC` export를 대신 처리합니다.
+
+SAM3 환경은 전용 스크립트가 없으므로 prefix 경로로 활성화합니다.
+
+```bash
+conda activate /path/to/Occlusion_renderer/.conda-envs/kds-sam3
+```
+
+### 2.2 최초 설치 (환경당 1회)
+
+`.condarc`의 `envs_dirs`·`pkgs_dirs`는 절대경로이므로, 새 머신에서는 먼저 이 레포 경로에 맞게 고칩니다.
+
+```bash
+REPO=/path/to/Occlusion_renderer
+BYTETRACK=/path/to/ByteTrack      # configs/base.yaml의 paths.bytetrack_repo
+BOXMOT=/path/to/boxmot            # configs/base.yaml의 paths.boxmot_repo
+
+cd "$REPO"
+export CONDARC="$REPO/.condarc"
 conda env create -f environment.yml           # kds-occlusion
 source scripts/activate_kds.sh
 
 python -m pip install torch==2.5.1 torchvision==0.20.1 \
   --index-url https://download.pytorch.org/whl/cu118      # 서버 드라이버에 맞게 조정
 python -m pip install -r requirements.txt
-MAX_JOBS=4 python -m pip install -v -e /path/to/ByteTrack --no-build-isolation
-python -m pip install -e /path/to/boxmot
+MAX_JOBS=4 python -m pip install -v -e "$BYTETRACK" --no-build-isolation
+python -m pip install -e "$BOXMOT"
 python -m pip install -e . --no-build-isolation --no-deps
 ```
+
+설치가 끝난 환경에 이 블록을 다시 돌리지 마세요. `conda env create`는 prefix가 이미 있어 실패하고,
+pip 줄들은 ByteTrack C 확장을 다시 빌드합니다. 활성화만 필요하면 2.1을 쓰면 됩니다.
 
 SAM3 환경(`environment.sam3.yml`) 설치와 smoke 절차는 [docs/SAM3_WORKFLOW.md](docs/SAM3_WORKFLOW.md)에 기록되어 있습니다.
 
@@ -66,7 +93,25 @@ SAM3 환경(`environment.sam3.yml`) 설치와 smoke 절차는 [docs/SAM3_WORKFLO
 
 ## 3. Dataset · dependency · checkpoint download
 
-경로는 `configs/base.yaml`의 `paths.*`에서 지정합니다.
+경로는 `configs/base.yaml`의 `paths.*`에서 지정합니다. 레포 안에 들어가는 것(KITTI, SAM3 체크포인트 등)은
+이 파일 기준 상대경로로 이미 잡혀 있고, 레포 밖에 두는 외부 체크아웃·데이터셋은 `${VAR:-fallback}` 형태라
+파일을 고치는 대신 환경변수로 덮어쓸 수 있습니다.
+
+| 환경변수 | `paths` 키 | 미설정 시 기본값 |
+| --- | --- | --- |
+| `KDS_MOT17` | `mot17` | `~/tmp_SwapPatch/data/MOT17` |
+| `KDS_BYTETRACK_REPO` | `bytetrack_repo` | `~/ByteTrack` |
+| `KDS_BOXMOT_REPO` | `boxmot_repo` | `~/boxmot` |
+| `KDS_TRACKEVAL_REPO` | `trackeval_repo` | `~/BankTweak/TrackEval` |
+| `KDS_YOLOX_X_CHECKPOINT` | `coco_pretrained_yolox_x` | `$KDS_BYTETRACK_REPO/pretrained/yolox_x.pth` |
+
+`KDS_BYTETRACK_REPO`만 바꾸면 YOLOX-X 체크포인트 경로도 같이 따라갑니다. 체크포인트를 다른 곳에 두었을 때만
+`KDS_YOLOX_X_CHECKPOINT`를 별도로 지정하면 됩니다.
+
+```bash
+export KDS_MOT17=/data/MOT17          # 예: 공용 스토리지에 있을 때
+python scripts/preflight.py --config configs/phase1_kitti.yaml   # 해석된 경로 전부 점검
+```
 
 ### 3.1 KITTI Tracking (배경/GT/eval)
 [KITTI Tracking benchmark](https://www.cvlibs.net/datasets/kitti/eval_tracking.php)에서 Download left color images of tracking data set, Download training labels of tracking data set을 받아 아래 구조로 풉니다.
@@ -79,7 +124,7 @@ unzip -n datasets/KITTI/data_tracking_label_2.zip -d datasets/KITTI
 
 ### 3.2 MOT17 (human tracklet source)
 [MOTChallenge MOT17](https://www.codabench.org/competitions/10049/#/pages-tab) train을 받아 풀고
-`configs/base.yaml`의 `paths.mot17`을 그 경로로 설정합니다(`train/MOT17-XX-FRCNN/{img1,gt,seqinfo.ini}`).
+`KDS_MOT17`을 그 경로로 지정합니다(`train/MOT17-XX-FRCNN/{img1,gt,seqinfo.ini}`).
 FRCNN detector view만 사용합니다(DPM/SDP 중복 제거).
 
 ### 3.3 SAM3 checkpoint
@@ -93,20 +138,20 @@ mkdir -p weights/sam3
 ### 3.4 YOLOX-X · ByteTrack · BoxMOT · TrackEval
 ```bash
 # ByteTrack (YOLOX 학습/추론 뼈대) — 위 2절에서 editable 설치
-git clone https://github.com/ifzhang/ByteTrack   # paths.bytetrack_repo
+git clone https://github.com/ifzhang/ByteTrack   # KDS_BYTETRACK_REPO
 # COCO-pretrained YOLOX-X 가중치(yolox_x.pth)는 YOLOX 공식 model zoo
 # (Megvii-BaseDetection/YOLOX) releases에서 받아 ByteTrack/pretrained/yolox_x.pth에 둡니다.
-# (paths.coco_pretrained_yolox_x)
+# (KDS_YOLOX_X_CHECKPOINT)
 
 # BoxMOT (ByteTrack 추적기 구현)
-git clone https://github.com/mikel-brostrom/boxmot  # paths.boxmot_repo
+git clone https://github.com/mikel-brostrom/boxmot  # KDS_BOXMOT_REPO
 
 # TrackEval (HOTA/CLEAR/Identity)
-git clone https://github.com/JonathonLuiten/TrackEval  # paths.trackeval_repo
+git clone https://github.com/JonathonLuiten/TrackEval  # KDS_TRACKEVAL_REPO
 ```
 
-`configs/base.yaml`의 `paths.{bytetrack_repo, boxmot_repo, trackeval_repo, coco_pretrained_yolox_x,
-sam3_checkpoint, kitti_tracking, mot17}`를 실제 경로로 맞춥니다.
+기본값(홈 디렉토리 바로 아래)과 다른 곳에 clone했다면 3절 앞머리의 환경변수로 지정하고,
+`paths.{sam3_checkpoint, kitti_tracking}`처럼 레포 안에 두는 항목만 `configs/base.yaml`에서 직접 맞춥니다.
 
 ---
 

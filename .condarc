@@ -5,4 +5,8 @@ pkgs_dirs:
 channels:
   - defaults
 channel_priority: flexible
+# conda only shortens the shell prompt to the env name when the env's parent
+# directory is literally named `envs` (conda/activate.py `_default_env`). Ours is
+# `.conda-envs`, so the default `({default_env})` renders the whole prefix.
+env_prompt: '({name}) '
 
