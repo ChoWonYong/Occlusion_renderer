@@ -19,9 +19,12 @@ AUG_LEVELS = {
 }
 
 
-def _experiment_name(condition: str, seed: int, aug: str = "full") -> str:
+def _experiment_name(
+    condition: str, seed: int, aug: str = "full", paste_mode: str | None = None
+) -> str:
     label = "kitti_finetuned" if condition == "kitti" else condition
-    return f"phase1_{label}_{aug}_seed{seed}"
+    suffix = f"_{paste_mode}" if condition == "treatment" and paste_mode else ""
+    return f"phase1_{label}{suffix}_{aug}_seed{seed}"
 
 
 def build_command(
@@ -30,6 +33,7 @@ def build_command(
     seed: int,
     aug: str = "full",
     max_epoch: int | None = None,
+    paste_mode: str | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     if condition not in {"kitti", "baseline", "treatment"}:
         raise ValueError("condition must be kitti, baseline, or treatment")
@@ -40,9 +44,19 @@ def build_command(
     checkpoint = config_path(config, path, "paths", "coco_pretrained_yolox_x")
     dataset_root = resolve_path(path.parent, config["dataset"]["output_dir"])
     exp_file = resolve_path(path.parent, config["train"]["exp_file"])
-    train_key = "finetune_train_json" if condition == "kitti" else f"{condition}_train_json"
+    if condition == "kitti":
+        train_key = "finetune_train_json"
+    elif condition == "treatment":
+        # The two paste modes produce different training sets; picking the wrong
+        # file would silently compare the wrong pair.
+        mode = paste_mode or str(config["dataset"].get("paste_mode", "replace"))
+        train_key = f"treatment_{mode}_train_json"
+        if train_key not in config["dataset"]:
+            train_key = "treatment_train_json"
+    else:
+        train_key = "baseline_train_json"
     train_ann = Path(config["dataset"][train_key]).name
-    experiment_name = _experiment_name(condition, seed, aug)
+    experiment_name = _experiment_name(condition, seed, aug, paste_mode)
     online_jitter, mosaic_mixup = AUG_LEVELS[aug]
     epochs = int(max_epoch if max_epoch is not None else config["train"]["epochs"])
     command = [
@@ -91,10 +105,11 @@ def run(
     aug: str = "full",
     max_epoch: int | None = None,
     dry_run: bool = False,
+    paste_mode: str | None = None,
 ) -> int:
-    command, env = build_command(config_file, condition, seed, aug, max_epoch)
+    command, env = build_command(config_file, condition, seed, aug, max_epoch, paste_mode)
     print(" ".join(shlex.quote(part) for part in command))
-    print(f"# aug={aug} online_jitter={env['KDS_ONLINE_JITTER']} mosaic_mixup={env['KDS_MOSAIC_MIXUP']} epochs={env['KDS_MAX_EPOCH']}")
+    print(f"# aug={aug} online_jitter={env['KDS_ONLINE_JITTER']} mosaic_mixup={env['KDS_MOSAIC_MIXUP']} epochs={env['KDS_MAX_EPOCH']} train_ann={env['KDS_YOLOX_TRAIN_ANN']}")
     if dry_run:
         return 0
     checkpoint = Path(command[command.index("-c") + 1])
@@ -112,10 +127,19 @@ def main() -> None:
     parser.add_argument("--aug", choices=sorted(AUG_LEVELS), default="full")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-epoch", type=int, default=None, help="override epoch count (smoke)")
+    parser.add_argument(
+        "--paste-mode",
+        choices=["append", "replace"],
+        default=None,
+        help="which treatment set to train on; must match how data/build_phase1.py was run",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     raise SystemExit(
-        run(args.config, args.condition, args.seed, args.aug, args.max_epoch, args.dry_run)
+        run(
+            args.config, args.condition, args.seed, args.aug,
+            args.max_epoch, args.dry_run, args.paste_mode,
+        )
     )
 
 

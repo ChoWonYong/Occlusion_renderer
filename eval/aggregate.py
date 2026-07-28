@@ -19,6 +19,8 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import re
+import statistics
 from pathlib import Path
 from typing import Any
 
@@ -122,16 +124,62 @@ def _row(label: str, metrics: dict[str, float]) -> str:
     return "| " + label + " | " + " | ".join(cells) + " |"
 
 
+_SEED_SUFFIX = re.compile(r"_seed\d+(?=_|$)")
+
+
+def arm_of(run_name: str) -> str:
+    """Run name with the seed stripped, so seeds of one condition group together."""
+    return _SEED_SUFFIX.sub("", run_name)
+
+
+def _mean_std(values: list[float]) -> tuple[float, float]:
+    """Mean and *sample* standard deviation (ddof=1), matching fine_tuned_baseline.md."""
+    mean = statistics.mean(values)
+    std = statistics.stdev(values) if len(values) > 1 else 0.0
+    return mean, std
+
+
+def _summary_row(label: str, metrics_list: list[dict[str, float]], count: int) -> str:
+    cells = []
+    for column in COLUMNS:
+        values = [m[column] for m in metrics_list if m.get(column) is not None]
+        if not values:
+            cells.append("-")
+            continue
+        mean, std = _mean_std(values)
+        fmt = "{:.0f}" if column in {"IDSW", "FP", "FN"} else "{:.2f}"
+        cells.append(f"**{fmt.format(mean)} ± {fmt.format(std)}**" if count > 1 else fmt.format(mean))
+    return f"| **{label}** (n={count}) | " + " | ".join(cells) + " |"
+
+
+def _section(
+    head: str, results: list[dict[str, Any]], key: str, class_name: str | None = None
+) -> list[str]:
+    def metrics(result: dict[str, Any]) -> dict[str, float]:
+        return result[key] if class_name is None else result[key][class_name]
+
+    lines = [head]
+    for result in results:
+        lines.append(_row(result["run"], metrics(result)))
+    grouped: dict[str, list[dict[str, float]]] = {}
+    for result in results:
+        grouped.setdefault(arm_of(result["run"]), []).append(metrics(result))
+    if any(len(items) > 1 for items in grouped.values()):
+        lines.append("")
+        for arm, items in grouped.items():
+            lines.append(_summary_row(arm, items, len(items)))
+    return lines
+
+
 def to_markdown(results: list[dict[str, Any]], class_names: list[str]) -> str:
     head = "| Run | " + " | ".join(COLUMNS) + " |\n|" + "---|" * (len(COLUMNS) + 1)
-    lines = ["## 전체 (combined, detection-weighted)", head]
-    for result in results:
-        lines.append(_row(result["run"], result["combined"]))
+    lines = ["## 전체 (combined, detection-weighted)"]
+    lines += _section(head, results, "combined")
     for name in class_names:
         lines.append(f"\n### {name}")
-        lines.append(head)
-        for result in results:
-            lines.append(_row(result["run"], result["per_class"][name]))
+        lines += _section(head, results, "per_class", name)
+    lines.append("")
+    lines.append("표준편차는 seed 간 sample standard deviation (ddof=1).")
     return "\n".join(lines)
 
 

@@ -1,22 +1,30 @@
-"""Target-rho placement and victim-relative scaling (Step 5).
+"""Generative occlusion-event placement (Step 5).
 
-Given a victim already chosen by the scheduler, we size the occluder relative to
-that victim's observed size and search over translation/scale so the resulting
-per-frame occlusion ratio (rho) forms a *complete* event: 0 -> rise -> single
-peak in the target band -> fall -> 0, with the rho >= 0.1 stretch lasting
-8-20 frames and peak <= 0.80.
+Confirmed 2026-07-27 policy. Difficulty is a *derived* quantity, not a target:
+physical parameters are drawn from priors and the occlusion bands act only as an
+acceptance gate.
 
-Scaling is victim-relative (confirmed 2026-07-23): the occluder's target height
-is the victim's height times the ratio of per-class canonical heights, so a
-pasted object matches how big a real object of its class would look next to that
-victim. Because the victim's observed size already encodes its depth, this needs
-no separate depth proxy.
+- Occluder height factor ~ ``U(class_height_range[class])`` — the real
+  intra-class size spread (a hatchback vs a van, a 1.55 m vs a 1.90 m adult), so
+  a pasted object is always at a physically plausible size. The previous design
+  searched a ``[0.80 .. 1.30]`` multiplier to hit a target rho, which rendered
+  69% of occluders at an implausible size (61% of cars at 1.20 m, 36% of people
+  at 2.21 m) because the multiplier was silently absorbing the proxy/mask gap
+  described below.
+- Lateral offset ~ ``U(-a, a) x (w_occluder + w_victim)/2`` — that span is the
+  centre separation at which two boxes just stop overlapping, so one prior
+  sweeps every class pair from full cover to no cover. Scaling the offset by the
+  victim width alone truncates the range for wide occluders (a 150 px car never
+  clears a 40 px pedestrian), which is what previously made partial car-on-
+  pedestrian occlusion unreachable.
+- Rho is measured on the *rendered* occluder mask through a per-frame integral
+  image. The victim's amodal mask is a filled rectangle (``bbox_to_mask``), so a
+  rectangle query is exact and costs the same O(1) as the old bounding-box
+  proxy. That proxy over-stated rho by 0.40-0.72x depending on occluder class,
+  which made the configured band distribution unachievable in rendered terms.
 
-These are geometry-agnostic primitives. The pipeline maps boxes and builds the
-per-frame rho series (bbox proxy for the victim); this module samples the target
-peak, sizes the occluder, scores/accepts candidate placements, and picks the best.
-The final rendered rho uses the real occluder mask, but the event *shape* is
-dominated by geometry, so the bbox proxy is an adequate search signal.
+Class-pair asymmetries in the resulting difficulty (a pedestrian cannot heavily
+occlude a car at the same depth) are physical and are deliberately kept.
 """
 
 from __future__ import annotations
@@ -24,40 +32,64 @@ from __future__ import annotations
 import random
 from typing import Any, Mapping, Sequence
 
+import numpy as np
+
 BBox = Sequence[float]
 
-# Peak-rho difficulty bands (aligned with occlusion_level bands).
+# Occlusion-strength bands. These classify an achieved peak; they are no longer
+# sampled as targets. The band table spans up to 1.0, but how far events are
+# actually allowed to go is set by ``peak_rho_max`` in config — 0.90, because the
+# synthetic data trains the detector rather than the tracker and a frame with no
+# visible pixels is an unlearnable target, not a hard one.
 PEAK_BANDS: dict[str, tuple[float, float]] = {
     "mild": (0.20, 0.35),
     "moderate": (0.35, 0.65),
-    "heavy": (0.65, 0.80),
+    "heavy": (0.65, 1.00),
 }
 
+# An event must reach at least the mild floor to be worth rendering.
+GATE_FLOOR = 0.20
 
-def sample_target_peak(
-    distribution: Mapping[str, float], rng: random.Random
-) -> tuple[float, str, tuple[float, float]]:
-    """Pick a difficulty band by weight, then a uniform peak within that band."""
-    names = list(distribution)
-    weights = [float(distribution[name]) for name in names]
-    if sum(weights) <= 0:
-        raise ValueError("peak_rho_distribution must have a positive total weight")
-    band_name = rng.choices(names, weights=weights, k=1)[0]
-    low, high = PEAK_BANDS[band_name]
-    return rng.uniform(low, high), band_name, (low, high)
+
+def classify_band(peak: float) -> str | None:
+    """Name the band a peak rho falls in, or ``None`` below the gate floor."""
+    for name, (low, high) in PEAK_BANDS.items():
+        if low <= peak <= high:
+            return name
+    return None
+
+
+def sample_height_factor(
+    class_height_range: Mapping[str, Sequence[float]], category: str, rng: random.Random
+) -> float:
+    """Draw a physically plausible canonical height factor for ``category``."""
+    low, high = (float(value) for value in class_height_range[category])
+    if low <= 0 or high < low:
+        raise ValueError(f"invalid class_height_range for {category!r}: {(low, high)}")
+    return rng.uniform(low, high)
+
+
+def mid_height_factor(
+    class_height_range: Mapping[str, Sequence[float]], category: str
+) -> float:
+    """Range midpoint, used for the victim (its observed size is the depth cue)."""
+    low, high = (float(value) for value in class_height_range[category])
+    return (low + high) / 2.0
 
 
 def class_relative_target_height(
     victim_height: float,
-    occluder_class: str,
-    victim_class: str,
-    class_height_factor: Mapping[str, float],
+    factor_occluder: float,
+    factor_victim: float,
 ) -> float:
-    """occluder target height = victim_height * factor[occluder] / factor[victim]."""
-    factor_occluder = float(class_height_factor[occluder_class])
-    factor_victim = float(class_height_factor[victim_class])
+    """Occluder pixel height of an object standing at the victim's distance.
+
+    Under perspective projection two objects at the same depth have image heights
+    in the ratio of their real heights, so the victim's observed height carries
+    all the depth information needed.
+    """
     if factor_victim <= 0 or factor_occluder <= 0:
-        raise ValueError("class_height_factor values must be positive")
+        raise ValueError("class height factors must be positive")
     if victim_height <= 0:
         raise ValueError("victim_height must be positive")
     return victim_height * factor_occluder / factor_victim
@@ -70,8 +102,66 @@ def occluder_scale(target_height: float, source_reference_height: float) -> floa
     return float(target_height) / float(source_reference_height)
 
 
+class AlphaIntegral:
+    """Summed-area table over one occluder crop's alpha mask.
+
+    Lets :func:`mask_cover_ratio` answer "how much of this axis-aligned rectangle
+    does the occluder's real mask cover" in four lookups, at any paste scale.
+    """
+
+    __slots__ = ("table", "height", "width")
+
+    def __init__(self, alpha: np.ndarray) -> None:
+        binary = (np.asarray(alpha) > 0).astype(np.int64)
+        if binary.ndim != 2:
+            raise ValueError("alpha must be a 2-D mask")
+        self.height, self.width = binary.shape
+        self.table = np.zeros((self.height + 1, self.width + 1), dtype=np.int64)
+        self.table[1:, 1:] = binary.cumsum(axis=0).cumsum(axis=1)
+
+    @property
+    def fill_ratio(self) -> float:
+        area = self.height * self.width
+        return float(self.table[-1, -1]) / area if area else 0.0
+
+    def count(self, x1: float, y1: float, x2: float, y2: float) -> int:
+        """Set pixels inside the source-crop rectangle ``[x1, x2) x [y1, y2)``."""
+        left = min(max(int(round(x1)), 0), self.width)
+        right = min(max(int(round(x2)), 0), self.width)
+        top = min(max(int(round(y1)), 0), self.height)
+        bottom = min(max(int(round(y2)), 0), self.height)
+        if right <= left or bottom <= top:
+            return 0
+        table = self.table
+        return int(
+            table[bottom, right] - table[top, right] - table[bottom, left] + table[top, left]
+        )
+
+
+def mask_cover_ratio(integral: AlphaIntegral, occluder: BBox, victim: BBox) -> float:
+    """Fraction of the victim rectangle covered by the occluder's real mask."""
+    ox, oy, ow, oh = (float(value) for value in occluder)
+    vx, vy, vw, vh = (float(value) for value in victim)
+    if ow <= 0 or oh <= 0 or vw <= 0 or vh <= 0:
+        return 0.0
+    # Map the victim rectangle into the occluder crop's own pixel grid.
+    scale_x = integral.width / ow
+    scale_y = integral.height / oh
+    covered = integral.count(
+        (vx - ox) * scale_x,
+        (vy - oy) * scale_y,
+        (vx + vw - ox) * scale_x,
+        (vy + vh - oy) * scale_y,
+    )
+    if covered == 0:
+        return 0.0
+    # One source pixel paints this much target area once the crop is scaled.
+    pixel_area = (ow / integral.width) * (oh / integral.height)
+    return min(1.0, covered * pixel_area / (vw * vh))
+
+
 def bbox_cover_ratio(occluder: BBox, victim: BBox) -> float:
-    """Fraction of the victim bbox area covered by the occluder bbox (rho proxy)."""
+    """Bounding-box overlap fraction. Kept for cheap pre-filters and tests."""
     ox, oy, ow, oh = (float(value) for value in occluder)
     vx, vy, vw, vh = (float(value) for value in victim)
     intersection_width = max(0.0, min(ox + ow, vx + vw) - max(ox, vx))
@@ -81,15 +171,26 @@ def bbox_cover_ratio(occluder: BBox, victim: BBox) -> float:
 
 
 def rho_series(
-    occluder_boxes: Sequence[BBox | None], victim_boxes: Sequence[BBox | None]
+    occluder_boxes: Sequence[BBox | None],
+    victim_boxes: Sequence[BBox | None],
+    integrals: Sequence[AlphaIntegral | None] | None = None,
 ) -> list[float]:
-    """Per-frame bbox-proxy rho; 0 where either box is absent."""
+    """Per-frame rho; 0 where either box is absent.
+
+    With ``integrals`` the ratio uses the occluder's real mask — what the
+    renderer will actually produce; without them it falls back to the bounding
+    box.
+    """
     series: list[float] = []
-    for occluder, victim in zip(occluder_boxes, victim_boxes):
+    for index, (occluder, victim) in enumerate(zip(occluder_boxes, victim_boxes)):
         if occluder is None or victim is None:
             series.append(0.0)
-        else:
+            continue
+        integral = integrals[index] if integrals is not None else None
+        if integral is None:
             series.append(bbox_cover_ratio(occluder, victim))
+        else:
+            series.append(mask_cover_ratio(integral, occluder, victim))
     return series
 
 
@@ -120,21 +221,30 @@ def event_shape(series: Sequence[float], floor: float = 0.1) -> dict[str, Any]:
 
 def accept_event(
     series: Sequence[float],
-    band: tuple[float, float],
+    band: tuple[float, float] | None = None,
     *,
     effective_range: tuple[int, int] = (8, 20),
-    peak_max: float = 0.80,
+    peak_max: float = 1.00,
     end_max: float = 0.05,
     floor: float = 0.1,
+    gate_floor: float = GATE_FLOOR,
 ) -> tuple[bool, str]:
-    """Accept a complete, single-peaked event whose peak lands in ``band``."""
+    """Gate a complete, single-peaked event.
+
+    ``band`` restricts the peak to one band; leaving it ``None`` is the
+    generative mode, where any peak from ``gate_floor`` to ``peak_max`` passes.
+    """
     metrics = event_shape(series, floor)
-    low, high = band
     peak = metrics["peak"]
     if peak > peak_max:
         return False, f"peak {peak:.3f} > peak_max {peak_max}"
-    if not (low <= peak <= high):
-        return False, f"peak {peak:.3f} outside band [{low}, {high}]"
+    if band is None:
+        if peak < gate_floor:
+            return False, f"peak {peak:.3f} < gate_floor {gate_floor}"
+    else:
+        low, high = band
+        if not (low <= peak <= high):
+            return False, f"peak {peak:.3f} outside band [{low}, {high}]"
     if metrics["num_runs"] != 1:
         return False, f"num_runs {metrics['num_runs']} != 1 (not a single event)"
     effective_low, effective_high = effective_range
@@ -147,34 +257,15 @@ def accept_event(
     return True, "ok"
 
 
-def candidate_peak_error(series: Sequence[float], target_peak: float) -> float:
-    peak = max(series) if series else 0.0
-    return abs(peak - float(target_peak))
+def offset_span(occluder_width: float, victim_width: float) -> float:
+    """Centre separation at which the two boxes stop overlapping.
 
-
-def select_best_placement(
-    candidates: Sequence[Mapping[str, Any]],
-    target_peak: float,
-    band: tuple[float, float],
-    **accept_kwargs: Any,
-) -> dict[str, Any] | None:
-    """Return the accepted candidate whose peak is closest to ``target_peak``.
-
-    Each candidate is a mapping with a ``rho_series`` and arbitrary ``params``
-    (start position, translation, scale multiplier). Returns ``None`` if no
-    candidate forms an acceptable event, and annotates the winner with its
-    achieved peak and peak error.
+    Normalising the lateral offset by this makes ``0`` mean "fully aligned" and
+    ``1`` mean "just clear" for every class pair, however wide the occluder is.
     """
-    best: tuple[float, dict[str, Any]] | None = None
-    for candidate in candidates:
-        series = candidate["rho_series"]
-        accepted, _ = accept_event(series, band, **accept_kwargs)
-        if not accepted:
-            continue
-        error = candidate_peak_error(series, target_peak)
-        if best is None or error < best[0]:
-            enriched = dict(candidate)
-            enriched["achieved_peak"] = max(series) if series else 0.0
-            enriched["peak_error"] = error
-            best = (error, enriched)
-    return best[1] if best is not None else None
+    return (float(occluder_width) + float(victim_width)) / 2.0
+
+
+def sample_lateral_offset(max_fraction: float, rng: random.Random) -> float:
+    """Draw a lateral offset in units of :func:`offset_span`."""
+    return rng.uniform(-float(max_fraction), float(max_fraction))

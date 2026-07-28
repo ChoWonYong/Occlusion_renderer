@@ -1,15 +1,19 @@
 """Event-based, variable-length occlusion synthesis pipeline (Step 7).
 
-Wires the confirmed 2026-07-23 policy end to end:
+Wires the 2026-07-27 policy end to end:
 - merge the MOT17 + KITTI multi-class tracklet pools;
 - per KITTI train sequence, plan victim events by density and class ratio
   (``synth.scheduler``);
-- for each event, size the occluder relative to its victim and search a
-  target-peak, complete-event placement (``synth.placement`` + ``synth.geometry``),
-  retrying with alternative tracklets on failure;
-- pack events so at most 2 occluders are ever concurrent;
+- for each event, draw physical parameters (occluder height from its class's real
+  size range, lateral offset from the separation prior) and keep the first draw
+  whose *mask-based* rho forms a complete single-peaked event
+  (``synth.placement`` + ``synth.geometry``), retrying with alternative tracklets
+  only when the drawn tracklet never passes;
+- allow at most ``max_occluders_per_victim`` occluders on any one victim; events
+  on different victims no longer compete for a global frame budget;
 - render large-first and emit extended GT with the ``amodal_original`` detector
-  bbox policy, synthetic occluder tracks, occlusion events, and QC.
+  bbox policy, ignore flags on effectively-invisible victims, synthetic occluder
+  tracks, occlusion events, and QC.
 
 The legacy fixed-30-frame ``synth.tracklet_pipeline`` is left untouched.
 """
@@ -21,7 +25,7 @@ import copy
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -33,9 +37,17 @@ from data.kitti_tracking import convert_tracking_to_video_coco
 from label.compute import label_frame_multi, label_synthetic_occluder
 from label.events import derive_events
 from qc.verify import verify_synthetic_video_dataset
-from synth.geometry import search_event_placement
-from synth.placement import sample_target_peak
-from synth.scheduler import EventPlan, PoolTracklet, merge_pools, plan_schedule, pool_by_category
+from synth.geometry import AlphaIntegralCache, sample_event_placement
+from synth.placement import mask_cover_ratio, mid_height_factor, sample_height_factor
+from synth.scheduler import (
+    EventPlan,
+    PoolTracklet,
+    claim_identity,
+    identity_available,
+    merge_pools,
+    plan_schedule,
+    pool_by_category,
+)
 from synth.tracklet_compositor import TrackletLayer, composite_tracklet_layers
 
 
@@ -50,9 +62,11 @@ class ScheduledRender:
     translation: tuple[float, float]
     kind: str
     victim_track_id: int | None
-    target_peak: float
     achieved_peak: float
+    band: str | None
     peak_frame: int | None
+    height_factor: float
+    lateral_offset_fraction: float
 
 
 def _load_rgb(path: str | Path) -> np.ndarray:
@@ -108,6 +122,77 @@ def _frames_annotations(
     return [list(annotations_by_image.get(int(frame["id"]), [])) for frame in source_frames]
 
 
+def _boxes_by_position(frames_annotations: list[list[dict[str, Any]]]) -> list[list[list[float]]]:
+    """Every real annotation's box per output frame position."""
+    return [
+        [[float(value) for value in annotation["bbox"]] for annotation in annotations]
+        for annotations in frames_annotations
+    ]
+
+
+def _boxes_overlap(first: Sequence[float], second: Sequence[float]) -> bool:
+    ax, ay, aw, ah = (float(value) for value in first)
+    bx, by, bw, bh = (float(value) for value in second)
+    return min(ax + aw, bx + bw) > max(ax, bx) and min(ay + ah, by + bh) > max(ay, by)
+
+
+class SceneBudget:
+    """Keeps pasted occluders from burying anything, across the whole sequence.
+
+    The event gate only scores an occluder against its own victim, so on its own
+    it lets a placement pass while covering an unrelated object it happens to
+    drive past — 118 of 174 over-cap frames in a full run, none of them the
+    occluder's intended victim — and it cannot see other scheduled events at all.
+
+    Two rules, checked together before a placement is accepted:
+
+    - a candidate must not overlap an already-placed occluder on any frame. Beyond
+      keeping pasted objects from covering each other, disjoint occluders have
+      disjoint masks, which is what makes the second rule exact;
+    - accumulated coverage of every real annotation stays at or below the cap.
+      With disjoint occluders the union over an object's box equals the sum of the
+      individual contributions, so summing is exact rather than conservative.
+
+    Box overlap (not mask overlap) is the disjointness test: it is O(1) and errs
+    toward rejecting, so the masks behind it are certainly disjoint.
+    """
+
+    def __init__(self, boxes_by_position: list[list[list[float]]], rho_max: float) -> None:
+        self._boxes = boxes_by_position
+        self._rho_max = float(rho_max)
+        self._committed: list[dict[int, float]] = [{} for _ in boxes_by_position]
+        self._placed: list[list[tuple[float, ...]]] = [[] for _ in boxes_by_position]
+
+    def accepts(
+        self, start: int, occluder_boxes: Sequence[Any], integrals: Sequence[Any]
+    ) -> bool:
+        for offset, (box, integral) in enumerate(zip(occluder_boxes, integrals)):
+            position = start + offset
+            if not 0 <= position < len(self._boxes):
+                continue
+            for placed in self._placed[position]:
+                if _boxes_overlap(box, placed):
+                    return False
+            committed = self._committed[position]
+            for index, other in enumerate(self._boxes[position]):
+                total = committed.get(index, 0.0) + mask_cover_ratio(integral, box, other)
+                if total > self._rho_max:
+                    return False
+        return True
+
+    def commit(self, start: int, occluder_boxes: Sequence[Any], integrals: Sequence[Any]) -> None:
+        for offset, (box, integral) in enumerate(zip(occluder_boxes, integrals)):
+            position = start + offset
+            if not 0 <= position < len(self._boxes):
+                continue
+            self._placed[position].append(tuple(float(value) for value in box))
+            committed = self._committed[position]
+            for index, other in enumerate(self._boxes[position]):
+                value = mask_cover_ratio(integral, box, other)
+                if value > 0:
+                    committed[index] = committed.get(index, 0.0) + value
+
+
 def _victim_positions(
     frames_annotations: list[list[dict[str, Any]]], victim_track_id: int
 ) -> dict[int, list[float]]:
@@ -129,50 +214,81 @@ def _resolve_placement(
     target_size: tuple[int, int],
     sequence_length: int,
     rng: random.Random,
+    integral_cache: AlphaIntegralCache,
+    usage: dict[tuple[Any, ...], int],
+    used_in_sequence: set[tuple[Any, ...]],
+    scene_check: Any = None,
 ) -> tuple[PoolTracklet, dict[str, Any]] | None:
-    """Search a target-peak placement, retrying with alternative same-class tracklets."""
-    multipliers = list(synthesis.get("scale_search_multipliers", [1.0]))
-    factors = dict(synthesis["class_height_factor"])
+    """Sample a placement, retrying with alternative same-class tracklets.
+
+    Retries respect both identity-reuse rules; before 2026-07-27 they ignored the
+    usage map entirely, which let one identity be pasted three times against a
+    cap of two. Retries are also capped: exhausting the whole 47-tracklet car
+    pool used to account for 74% of all search work while producing nothing,
+    because a placement that fails does so on the class pair's geometry, not on
+    which particular crop was drawn.
+    """
+    ranges = dict(synthesis["class_height_range"])
     effective = tuple(synthesis.get("effective_event_frames", [8, 20]))
     accept_kwargs = {
         "effective_range": (int(effective[0]), int(effective[1])),
-        "peak_max": float(synthesis.get("peak_rho_max", 0.80)),
+        "peak_max": float(synthesis.get("peak_rho_max", 1.00)),
         "end_max": float(synthesis.get("event_end_rho_max", 0.05)),
+        "gate_floor": float(synthesis.get("event_gate_floor", 0.20)),
     }
-    target_peak, _, band = sample_target_peak(dict(synthesis["peak_rho_distribution"]), rng)
+    max_lateral = float(synthesis.get("max_lateral_offset_fraction", 1.15))
+    draws = int(synthesis.get("placement_draws", 24))
+    max_tracklets = int(synthesis.get("placement_max_tracklets", 8))
+    factor_victim = mid_height_factor(ranges, victim_class)
 
-    tried: set[int] = set()
-    attempts = [event.occluder] + [t for t in grouped_pool.get(event.occluder.category, [])]
-    for occluder in attempts:
-        if occluder.tracklet_id in tried:
+    candidates = [event.occluder] + [
+        tracklet
+        for tracklet in grouped_pool.get(event.occluder.category, [])
+        if tracklet.tracklet_id != event.occluder.tracklet_id
+    ]
+    tried = 0
+    for occluder in candidates:
+        if tried >= max_tracklets:
+            break
+        if occluder is not event.occluder and not identity_available(
+            occluder, usage, used_in_sequence, int(synthesis.get("max_per_identity", 2))
+        ):
             continue
-        tried.add(occluder.tracklet_id)
+        tried += 1
         exposure = min(event.exposure_length, occluder.length)
         occluder_frames = occluder.frames[:exposure]
-        best = search_event_placement(
+        integrals = integral_cache.for_frames(occluder_frames)
+        placement = sample_event_placement(
             occluder_frames,
             victim_positions,
-            occluder_class=occluder.category,
-            victim_class=victim_class,
-            class_height_factor=factors,
-            target_peak=target_peak,
-            band=band,
-            multipliers=multipliers,
+            factor_occluder=sample_height_factor(ranges, occluder.category, rng),
+            factor_victim=factor_victim,
+            integrals=integrals,
             target_size=target_size,
             sequence_length=sequence_length,
+            max_lateral_fraction=max_lateral,
+            rng=rng,
+            attempts=draws,
             accept_kwargs=accept_kwargs,
+            scene_check=scene_check,
         )
-        if best is not None:
-            best["target_peak"] = target_peak
-            best["exposure_length"] = exposure
-            return occluder, best
+        if placement is not None:
+            placement["exposure_length"] = exposure
+            placement["integrals"] = integrals
+            if occluder is not event.occluder:
+                claim_identity(occluder, usage, used_in_sequence)
+            return occluder, placement
     return None
 
 
-def _fits_concurrency(
-    occupancy: list[int], start: int, length: int, max_concurrent: int, allow_concurrent: bool
-) -> bool:
-    ceiling = max_concurrent if allow_concurrent else 1
+def _fits_victim_budget(occupancy: list[int], start: int, length: int, ceiling: int) -> bool:
+    """At most ``ceiling`` occluders on *this victim* at once.
+
+    Until 2026-07-27 the counter was global to the frame, so an event occluding a
+    pedestrian on the left of the road competed with one occluding a car on the
+    right; that discarded 44% of successfully placed events while leaving an
+    average of only 0.52 occluders on screen.
+    """
     return all(occupancy[position] < ceiling for position in range(start, start + length))
 
 
@@ -196,8 +312,10 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
 
     detector_bbox_policy = str(synthesis.get("victim_detector_bbox_policy", "amodal_original"))
     blend_method = str(synthesis.get("blend_method", "none"))
-    max_concurrent = int(synthesis.get("max_concurrent_occluders", 2))
+    max_per_victim = int(synthesis.get("max_occluders_per_victim", 2))
     rng = random.Random(int(config.get("seed", 0)))
+    integral_cache = AlphaIntegralCache()
+    identity_usage: dict[tuple[Any, ...], int] = {}
     output_dir = resolve_path(path.parent, synthesis["output_dir"])
     output_frames_dir = output_dir / "frames"
     max_sequences = int(max_sequences_override or synthesis.get("max_sequences", len(frames_by_video)))
@@ -206,7 +324,10 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
         "info": {
             "description": "Event-based multi-class tracklet copy-paste on KITTI Tracking",
             "detector_bbox_policy": detector_bbox_policy,
-            "scale_policy": "victim_relative",
+            "scale_policy": "class_height_range_sampled",
+            "rho_method": "occluder_mask_integral_image",
+            "rho_control": "lateral_offset",
+            "ignore_rule": "none: every victim the baseline trains on stays a positive",
             "amodal_mask_caveat": "KITTI victim amodal masks use bounding-box proxies.",
         },
         "videos": [],
@@ -231,16 +352,22 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
             continue
         target_size = (int(source_frames[0]["width"]), int(source_frames[0]["height"]))
         frames_annotations = _frames_annotations(source_frames, annotations_by_image)
-        plan = plan_schedule(frames_annotations, pool, synthesis, rng)
+        plan = plan_schedule(frames_annotations, pool, synthesis, rng, usage=identity_usage)
+        used_in_sequence = plan["used_identities"]
+        scene = SceneBudget(
+            _boxes_by_position(frames_annotations), float(synthesis.get("peak_rho_max", 0.90))
+        )
 
         output_video_id = generated + 1
         occupancy = [0] * sequence_length
+        victim_occupancy: dict[int, list[int]] = {}
         scheduled: list[ScheduledRender] = []
         next_synth_track = 900000 + output_video_id * 1000
         rejected = 0
         for event in plan["events"]:
-            if event.kind != "victim" or event.victim_track_id is None:
-                continue  # boundary events handled separately below
+            if event.victim_track_id is None:
+                rejected += 1
+                continue
             victim_positions = _victim_positions(frames_annotations, event.victim_track_id)
             if not victim_positions:
                 rejected += 1
@@ -254,19 +381,24 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
             victim_class = name_by_category_id[victim_category_id]
             resolved = _resolve_placement(
                 event, victim_positions, victim_class, grouped_pool, synthesis,
-                target_size, sequence_length, rng,
+                target_size, sequence_length, rng, integral_cache,
+                identity_usage, used_in_sequence, scene.accepts,
             )
             if resolved is None:
                 rejected += 1
                 continue
             occluder, best = resolved
-            if not _fits_concurrency(
-                occupancy, best["start_position"], best["exposure_length"],
-                max_concurrent, event.allow_concurrent,
+            budget = victim_occupancy.setdefault(int(event.victim_track_id), [0] * sequence_length)
+            if not _fits_victim_budget(
+                budget, best["start_position"], best["exposure_length"], max_per_victim
             ):
                 rejected += 1
                 continue
+            # Only now does this placement become part of the scene the next
+            # candidate has to fit around.
+            scene.commit(best["start_position"], best["occluder_boxes"], best["integrals"])
             for position in range(best["start_position"], best["start_position"] + best["exposure_length"]):
+                budget[position] += 1
                 occupancy[position] += 1
             scheduled.append(
                 ScheduledRender(
@@ -279,9 +411,11 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
                     translation=tuple(best["translation"]),
                     kind="victim",
                     victim_track_id=int(event.victim_track_id),
-                    target_peak=float(best["target_peak"]),
                     achieved_peak=float(best["achieved_peak"]),
+                    band=best["band"],
                     peak_frame=int(best["peak_frame"]),
+                    height_factor=float(best["height_factor"]),
+                    lateral_offset_fraction=float(best["lateral_offset_fraction"]),
                 )
             )
             next_synth_track += 1
@@ -325,7 +459,10 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
                             "source": sched.occluder.source,
                             "identity": list(sched.occluder.identity_key),
                             "victim_track_id": sched.victim_track_id,
-                            "target_peak": sched.target_peak,
+                            "achieved_peak": sched.achieved_peak,
+                            "band": sched.band,
+                            "height_factor": sched.height_factor,
+                            "lateral_offset_fraction": sched.lateral_offset_fraction,
                             "translation_xy": list(sched.translation),
                         },
                     )
@@ -423,15 +560,18 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
                     "exposure_length": sched.exposure_length,
                     "rendered_frames": rendered_frames,
                     "victim_track_id": sched.victim_track_id,
-                    "target_peak": sched.target_peak,
                     "achieved_peak": sched.achieved_peak,
+                    "band": sched.band,
                     "peak_frame": sched.peak_frame,
+                    "height_factor": sched.height_factor,
+                    "lateral_offset_fraction": sched.lateral_offset_fraction,
                     "translation_xy": list(sched.translation),
                 }
             )
         summary = dict(plan["summary"])
         summary.update({"video": output_name, "scheduled": len(scheduled), "rejected": rejected,
-                         "peak_occupancy": max(occupancy) if occupancy else 0})
+                         "peak_occupancy": max(occupancy) if occupancy else 0,
+                         "mean_occupancy": (sum(occupancy) / len(occupancy)) if occupancy else 0.0})
         scheduling_summaries.append(summary)
         generated += 1
 

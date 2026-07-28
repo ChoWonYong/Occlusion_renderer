@@ -34,16 +34,26 @@ EPOCH_CKPT = {
 }
 
 
-def _experiment_dir_name(condition: str, aug: str, seed: int) -> str:
+def _experiment_dir_name(
+    condition: str, aug: str, seed: int, paste_mode: str | None = None
+) -> str:
+    """Must match ``train.run._experiment_name`` or the checkpoint will not be found."""
     label = "kitti_finetuned" if condition == "kitti" else condition
-    return f"phase1_{label}_{aug}_seed{seed}"
+    suffix = f"_{paste_mode}" if condition == "treatment" and paste_mode else ""
+    return f"phase1_{label}{suffix}_{aug}_seed{seed}"
 
 
 def _checkpoint_path(
-    config: dict[str, Any], path: Path, condition: str, seed: int, aug: str, epoch: str
+    config: dict[str, Any],
+    path: Path,
+    condition: str,
+    seed: int,
+    aug: str,
+    epoch: str,
+    paste_mode: str | None = None,
 ) -> Path:
     output = resolve_path(path.parent, config["train"]["output_dir"])
-    return output / _experiment_dir_name(condition, aug, seed) / EPOCH_CKPT[epoch]
+    return output / _experiment_dir_name(condition, aug, seed, paste_mode) / EPOCH_CKPT[epoch]
 
 
 def _load_model(
@@ -192,6 +202,7 @@ def run(
     model_source: str = "finetuned",
     aug: str = "full",
     epoch: str = "ep60",
+    paste_mode: str | None = None,
 ) -> dict[str, Any]:
     if condition not in {"kitti", "baseline", "treatment"}:
         raise ValueError("condition must be kitti, baseline, or treatment")
@@ -200,12 +211,16 @@ def run(
     if epoch not in EPOCH_CKPT:
         raise ValueError(f"epoch must be one of {sorted(EPOCH_CKPT)}")
     config, path = load_config(config_file)
+    if condition == "treatment" and paste_mode is None:
+        # Resolve the same way train.run does, so omitting the flag cannot point
+        # the evaluation at a different run than the one that was trained.
+        paste_mode = str(config["dataset"].get("paste_mode", "replace"))
     if checkpoint_override:
         checkpoint = Path(checkpoint_override).resolve()
     elif model_source == "coco-pretrained":
         checkpoint = config_path(config, path, "paths", "coco_pretrained_yolox_x")
     else:
-        checkpoint = _checkpoint_path(config, path, condition, seed, aug, epoch)
+        checkpoint = _checkpoint_path(config, path, condition, seed, aug, epoch, paste_mode)
     if not checkpoint.is_file():
         raise FileNotFoundError(f"fine-tuned checkpoint not found: {checkpoint}")
     device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
@@ -225,7 +240,7 @@ def run(
     run_name = (
         "phase1_coco_pretrained"
         if model_source == "coco-pretrained"
-        else f"{_experiment_dir_name(condition, aug, seed)}_{epoch}"
+        else f"{_experiment_dir_name(condition, aug, seed, paste_mode)}_{epoch}"
     )
 
     try:
@@ -303,6 +318,9 @@ def run(
         "condition": condition,
         "model_source": model_source,
         "seed": seed,
+        "aug": aug,
+        "epoch": epoch,
+        "paste_mode": paste_mode,
         "checkpoint": str(checkpoint),
         "tracker": "BoxMOT ByteTrack (ReID disabled)",
         "output_dir": str(output_root),
@@ -326,6 +344,12 @@ def main() -> None:
     parser.add_argument("--aug", choices=["none", "jitter", "full"], default="full")
     parser.add_argument("--epoch", choices=["ep50", "ep60"], default="ep60")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--paste-mode",
+        choices=["append", "replace"],
+        default=None,
+        help="which treatment run to evaluate; must match how it was trained",
+    )
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--skip-metrics", action="store_true")
     args = parser.parse_args()
@@ -339,6 +363,7 @@ def main() -> None:
             args.model_source,
             args.aug,
             args.epoch,
+            args.paste_mode,
         )
     )
 

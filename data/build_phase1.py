@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import argparse
 import copy
-import os
 import random
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from common.config import config_path, load_config, resolve_path
 from common.io import load_json, save_json
@@ -105,65 +104,145 @@ def _filter_paste_frames(dataset: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _augment_equal_budget(
-    source: dict[str, Any], count: int, output_root: Path, seed: int
-) -> dict[str, Any]:
-    try:
-        from PIL import Image, ImageEnhance
-    except ImportError as exc:
-        raise RuntimeError("Pillow is required: pip install -r requirements.txt") from exc
-    rng = random.Random(seed)
-    annotations_by_image: dict[int, list[dict[str, Any]]] = {}
-    for annotation in source["annotations"]:
-        annotations_by_image.setdefault(int(annotation["image_id"]), []).append(annotation)
-    result = _empty_like(source, "Equal-budget simple augmentation for Phase-1 baseline")
-    for index in range(count):
-        image_info = rng.choice(source["images"])
-        source_path = output_root / image_info["file_name"]
-        method = "horizontal_flip" if index % 2 == 0 else "color_jitter"
-        with Image.open(source_path) as image:
-            image = image.convert("RGB")
-            if method == "horizontal_flip":
-                augmented = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+def paste_components(
+    synthetic: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Group pasted tracklets into units that can be toggled independently.
+
+    A rendered frame bakes in every occluder active at that moment, so a single
+    tracklet cannot be switched off without re-rendering. Tracklets that share
+    any frame are therefore merged into one component; each frame then belongs to
+    exactly one component, and toggling a component is well defined.
+
+    Returns one entry per component with its ``tracks`` and the synthetic
+    ``image_ids`` it covers.
+    """
+    frames_by_track: dict[tuple[int, int], set[int]] = {}
+    for annotation in synthetic.get("annotations", []):
+        if annotation.get("synthetic_occluder") is not True:
+            continue
+        key = (int(annotation.get("video_id", 0)), int(annotation["track_id"]))
+        frames_by_track.setdefault(key, set()).add(int(annotation["image_id"]))
+
+    parent: dict[tuple[int, int], tuple[int, int]] = {key: key for key in frames_by_track}
+
+    def find(node: tuple[int, int]) -> tuple[int, int]:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(left: tuple[int, int], right: tuple[int, int]) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    owner: dict[int, tuple[int, int]] = {}
+    for key, image_ids in frames_by_track.items():
+        for image_id in image_ids:
+            if image_id in owner:
+                union(owner[image_id], key)
             else:
-                augmented = ImageEnhance.Color(ImageEnhance.Brightness(image).enhance(rng.uniform(0.85, 1.15))).enhance(
-                    rng.uniform(0.85, 1.15)
-                )
-        relative = Path("images") / "baseline_aug" / f"aug_{index:08d}.jpg"
-        destination = output_root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        augmented.save(destination, quality=95, subsampling=0)
-        video_id = index + 1
-        image_id = index + 1
-        result["videos"].append({"id": video_id, "name": f"baseline_aug_{index:08d}", "num_frames": 1})
-        result["images"].append(
-            {
-                "id": image_id,
-                "video_id": video_id,
-                "frame_index": 0,
-                "frame_id": 1,
-                "file_name": str(relative),
-                "width": int(image_info["width"]),
-                "height": int(image_info["height"]),
-                "augmentation": method,
-            }
-        )
-        for source_annotation in annotations_by_image.get(int(image_info["id"]), []):
-            annotation = copy.deepcopy(source_annotation)
+                owner[image_id] = key
+
+    grouped: dict[tuple[int, int], dict[str, Any]] = {}
+    for key, image_ids in frames_by_track.items():
+        root = find(key)
+        entry = grouped.setdefault(root, {"tracks": [], "image_ids": set()})
+        entry["tracks"].append(key)
+        entry["image_ids"] |= image_ids
+    components = [
+        {"tracks": sorted(entry["tracks"]), "image_ids": sorted(entry["image_ids"])}
+        for entry in grouped.values()
+    ]
+    components.sort(key=lambda component: component["image_ids"][0] if component["image_ids"] else -1)
+    return components
+
+
+def _replace_with_paste_frames(
+    train_local: dict[str, Any],
+    synthetic_local: dict[str, Any],
+    probability: float,
+    seed: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Swap selected original frames for their pasted renders, keeping the count.
+
+    Appending the synthetic frames instead would give the treatment arm ~1.9x the
+    images and therefore ~1.9x the gradient steps at the same epoch count, which
+    the removed equal-budget padding used to hide. Replacing keeps both arms at
+    the original frame count so the only difference is what is in the pixels.
+
+    Selection happens per component from :func:`paste_components`, not per frame:
+    a frame-wise coin flip would leave an occluder present on one frame and gone
+    on the next, destroying the temporal continuity the method exists to create.
+    """
+    rng = random.Random(seed)
+    components = paste_components(synthetic_local)
+    selected_images: set[int] = set()
+    selected_components = 0
+    for component in components:
+        if rng.random() < float(probability):
+            selected_components += 1
+            selected_images.update(component["image_ids"])
+
+    synthetic_by_source: dict[int, dict[str, Any]] = {}
+    for image in synthetic_local["images"]:
+        if int(image["id"]) not in selected_images:
+            continue
+        source = image.get("source", {})
+        if "image_id" not in source:
+            raise KeyError("synthetic images must record source.image_id to replace originals")
+        synthetic_by_source[int(source["image_id"])] = image
+    synthetic_annotations: dict[int, list[dict[str, Any]]] = {}
+    for annotation in synthetic_local["annotations"]:
+        synthetic_annotations.setdefault(int(annotation["image_id"]), []).append(annotation)
+
+    result = _empty_like(train_local, "Treatment: original KITTI train split with paste frames swapped in")
+    result["videos"] = copy.deepcopy(train_local.get("videos", []))
+    train_annotations: dict[int, list[dict[str, Any]]] = {}
+    for annotation in train_local["annotations"]:
+        train_annotations.setdefault(int(annotation["image_id"]), []).append(annotation)
+
+    replaced = 0
+    for image in train_local["images"]:
+        original_id = int(image["id"])
+        pasted = synthetic_by_source.get(original_id)
+        if pasted is None:
+            copied = copy.deepcopy(image)
+            annotations = copy.deepcopy(train_annotations.get(original_id, []))
+        else:
+            replaced += 1
+            copied = copy.deepcopy(image)
+            copied["file_name"] = pasted["file_name"]
+            copied["pasted"] = True
+            annotations = copy.deepcopy(synthetic_annotations.get(int(pasted["id"]), []))
+        result["images"].append(copied)
+        for annotation in annotations:
             annotation["id"] = len(result["annotations"]) + 1
-            annotation["image_id"] = image_id
-            annotation["video_id"] = video_id
-            annotation["frame_index"] = 0
-            annotation["track_id"] = int(source_annotation["track_id"])
-            if method == "horizontal_flip":
-                x, y, width, height = (float(value) for value in annotation["bbox"])
-                annotation["bbox"] = [float(image_info["width"]) - x - width, y, width, height]
-                annotation["segmentation"] = []
+            annotation["image_id"] = original_id
+            annotation["video_id"] = int(copied.get("video_id", annotation.get("video_id", 0)))
             result["annotations"].append(annotation)
-    return result
+
+    stats = {
+        "components": len(components),
+        "components_selected": selected_components,
+        "frames_replaced": replaced,
+        "paste_probability": float(probability),
+    }
+    return result, stats
 
 
-def run(config_file: str | Path) -> dict[str, Any]:
+def run(config_file: str | Path, paste_mode: str | None = None) -> dict[str, Any]:
+    """Build the eval set plus a baseline and a treatment training set.
+
+    The baseline is the plain original KITTI train split. Copy-paste occlusion is
+    the method under test, so the arms differ only by it — every other knob
+    (mosaic, mixup, flip, HSV, schedule) is identical and applied online by the
+    trainer.
+
+    ``paste_mode`` is ``"append"`` (default) or ``"replace"``; see
+    :func:`_replace_with_paste_frames` for why the two exist.
+    """
     config, path = load_config(config_file)
     split = load_json(resolve_path(path.parent, config["split"]["output"]))
     kitti_root = config_path(config, path, "paths", "kitti_tracking")
@@ -194,46 +273,67 @@ def run(config_file: str | Path) -> dict[str, Any]:
         image["file_name"] = str(relative)
     synthetic_local.pop("root", None)
 
-    treatment = _empty_like(train_local, "Treatment: original KITTI train split plus paste frames")
-    _append_dataset(treatment, train_local)
-    _append_dataset(treatment, synthetic_local)
+    mode = str(paste_mode or config["dataset"].get("paste_mode", "replace"))
+    if mode not in {"append", "replace"}:
+        raise ValueError("dataset.paste_mode must be 'append' or 'replace'")
+    paste_stats: dict[str, Any] = {}
+    if mode == "append":
+        treatment = _empty_like(train_local, "Treatment: original KITTI train split plus paste frames")
+        _append_dataset(treatment, train_local)
+        _append_dataset(treatment, synthetic_local)
+    else:
+        treatment, paste_stats = _replace_with_paste_frames(
+            train_local,
+            synthetic_local,
+            float(config["dataset"].get("paste_probability", 1.0)),
+            int(config["seed"]),
+        )
 
-    # Equal-budget baseline is optional (dataset.baseline_equal_budget). When on,
-    # the baseline pads the original train with the same number of simple
-    # flip/color-jitter frames as the added paste frames; when off, the baseline
-    # is the original train split alone.
     baseline = _empty_like(train_local, "Baseline: original KITTI train split")
     _append_dataset(baseline, train_local)
-    equal_budget = bool(config["dataset"].get("baseline_equal_budget", True))
-    if equal_budget and synthetic_local["images"]:
-        baseline_aug = _augment_equal_budget(
-            train_local, len(synthetic_local["images"]), output_root, int(config["seed"])
-        )
-        _append_dataset(baseline, baseline_aug)
 
-    annotation_dir = output_root / "annotations"
+    treatment_key = config["dataset"].get(
+        f"treatment_{mode}_train_json", config["dataset"]["treatment_train_json"]
+    )
     baseline_path = output_root / config["dataset"]["baseline_train_json"]
-    treatment_path = output_root / config["dataset"]["treatment_train_json"]
+    treatment_path = output_root / treatment_key
     eval_path = output_root / config["dataset"]["eval_json"]
     save_json(baseline_path, baseline)
     save_json(treatment_path, treatment)
     save_json(eval_path, eval_local)
     summary = {
+        "paste_mode": mode,
         "baseline_images": len(baseline["images"]),
         "treatment_images": len(treatment["images"]),
-        "equal_budget": len(baseline["images"]) == len(treatment["images"]),
+        "baseline_annotations": len(baseline["annotations"]),
+        "treatment_annotations": len(treatment["annotations"]),
+        # Equal iteration budget is what "replace" buys: same image count, so the
+        # same number of gradient steps per epoch in both arms.
+        "matched_image_budget": len(baseline["images"]) == len(treatment["images"]),
         "eval_images": len(eval_local["images"]),
+        "treatment_train_json": str(treatment_path.relative_to(output_root)),
         "output_dir": str(output_root),
     }
-    save_json(output_root / "summary.json", summary)
+    summary.update(paste_stats)
+    save_json(output_root / f"summary_{mode}.json", summary)
     return summary
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build equal-budget Phase-1 YOLOX baseline/treatment datasets")
+    parser = argparse.ArgumentParser(description="Build Phase-1 YOLOX baseline/treatment datasets")
     parser.add_argument("--config", default="configs/phase1_kitti.yaml", type=Path)
+    parser.add_argument(
+        "--paste-mode",
+        choices=["append", "replace"],
+        default=None,
+        help=(
+            "append (default): paste frames are added, so the treatment arm sees more "
+            "images and more gradient steps. replace: paste frames swap in for their "
+            "source frames, matching the baseline's image and iteration budget."
+        ),
+    )
     args = parser.parse_args()
-    print(run(args.config))
+    print(run(args.config, args.paste_mode))
 
 
 if __name__ == "__main__":
