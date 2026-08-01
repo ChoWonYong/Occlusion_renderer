@@ -1,0 +1,9 @@
+# The paste-jitter control: copy-paste occlusion with the crops composited
+# verbatim, which is what phase1_treatment_replace_full_seed{0,1,2} were trained
+# on before jitter became the default. Kept so that arm stays reproducible.
+base: phase1_kitti.yaml
+
+tracklet_synthesis:
+  paste_jitter:
+    # Quoted: YAML 1.1 parses a bare off as a boolean.
+    preset: "off"

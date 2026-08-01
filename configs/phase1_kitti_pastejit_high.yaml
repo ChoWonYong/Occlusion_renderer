@@ -1,0 +1,12 @@
+# Phase-1 treatment arm with strong per-frame jitter on the pasted occluder
+# crops. See phase1_kitti_pastejit_low.yaml — same arm, widest ranges.
+base: phase1_kitti.yaml
+
+tracklet_synthesis:
+  output_dir: ../artifacts/phase1/tracklet_synthetic_pastejit_high
+  paste_jitter:
+    preset: high
+
+dataset:
+  synthetic_output_dir: ../artifacts/phase1/tracklet_synthetic_pastejit_high
+  output_dir: ../artifacts/phase1/yolox_data_pastejit_high

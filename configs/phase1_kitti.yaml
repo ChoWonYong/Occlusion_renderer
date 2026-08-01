@@ -156,6 +156,25 @@ tracklet_synthesis:
   paste_order: large_first
   # Hard paste is the experiment default. Alpha blending is intentionally deferred.
   blend_method: none
+  # Per-frame appearance jitter on the pasted crop (synth/paste_jitter.py): every
+  # frame of a pasted tracklet gets its own colour/brightness/contrast/sharpness/
+  # flip/scale/rotation draw. flip, rotation and scale change the alpha mask and
+  # therefore rho, so the jitter is drawn *before* the placement search rather
+  # than at render time — turning it on changes which events pass the gate, not
+  # just how the pixels look.
+  #
+  # 2026-08-01: default is now "mid". Measured on KITTI eval, ep60, 3 seeds:
+  # HOTA 55.78 +- 0.38 (off) -> 56.20 +- 0.34 (low) -> 56.69 +- 0.15 (mid), with
+  # the gain concentrated in the two classes the occluder pool draws from
+  # (person +1.90, car +0.57). Every mid seed beat every off seed.
+  #
+  # NOTE: with jitter on by default, re-running kds-synth-events with *this*
+  # config rewrites artifacts/phase1/tracklet_synthetic — which currently holds
+  # the no-jitter frames the phase1_treatment_replace_full runs were trained on.
+  # Use configs/phase1_kitti_nojitter.yaml to regenerate that arm instead.
+  paste_jitter:
+    # Quoted: YAML 1.1 parses a bare off/no/false as a boolean.
+    preset: mid                       # off | low | mid | high (ranges may be overridden)
 
 synthesis:
   output_dir: ../artifacts/phase1/synthetic

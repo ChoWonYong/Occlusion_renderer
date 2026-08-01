@@ -38,6 +38,13 @@ from label.compute import label_frame_multi, label_synthetic_occluder
 from label.events import derive_events
 from qc.verify import verify_synthetic_video_dataset
 from synth.geometry import AlphaIntegralCache, sample_event_placement
+from synth.paste_jitter import (
+    FrameJitter,
+    JitterRanges,
+    jitter_rgba,
+    ranges_from_config,
+    sample_sequence,
+)
 from synth.placement import mask_cover_ratio, mid_height_factor, sample_height_factor
 from synth.scheduler import (
     EventPlan,
@@ -67,6 +74,7 @@ class ScheduledRender:
     peak_frame: int | None
     height_factor: float
     lateral_offset_fraction: float
+    jitters: tuple[FrameJitter, ...]
 
 
 def _load_rgb(path: str | Path) -> np.ndarray:
@@ -218,6 +226,7 @@ def _resolve_placement(
     usage: dict[tuple[Any, ...], int],
     used_in_sequence: set[tuple[Any, ...]],
     scene_check: Any = None,
+    jitter_ranges: JitterRanges | None = None,
 ) -> tuple[PoolTracklet, dict[str, Any]] | None:
     """Sample a placement, retrying with alternative same-class tracklets.
 
@@ -257,7 +266,11 @@ def _resolve_placement(
         tried += 1
         exposure = min(event.exposure_length, occluder.length)
         occluder_frames = occluder.frames[:exposure]
-        integrals = integral_cache.for_frames(occluder_frames)
+        # Drawn once per candidate, before the search: the flip/rotation/scale in
+        # it change rho, so the integrals scored below and the patches pasted at
+        # render time have to come from this one sequence.
+        jitters = sample_sequence(jitter_ranges, exposure, rng)
+        integrals = integral_cache.for_frames(occluder_frames, jitters)
         placement = sample_event_placement(
             occluder_frames,
             victim_positions,
@@ -271,10 +284,12 @@ def _resolve_placement(
             attempts=draws,
             accept_kwargs=accept_kwargs,
             scene_check=scene_check,
+            jitters=jitters,
         )
         if placement is not None:
             placement["exposure_length"] = exposure
             placement["integrals"] = integrals
+            placement["jitters"] = jitters
             if occluder is not event.occluder:
                 claim_identity(occluder, usage, used_in_sequence)
             return occluder, placement
@@ -312,6 +327,7 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
 
     detector_bbox_policy = str(synthesis.get("victim_detector_bbox_policy", "amodal_original"))
     blend_method = str(synthesis.get("blend_method", "none"))
+    jitter_ranges = ranges_from_config(synthesis.get("paste_jitter"))
     max_per_victim = int(synthesis.get("max_occluders_per_victim", 2))
     rng = random.Random(int(config.get("seed", 0)))
     integral_cache = AlphaIntegralCache()
@@ -327,6 +343,7 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
             "scale_policy": "class_height_range_sampled",
             "rho_method": "occluder_mask_integral_image",
             "rho_control": "lateral_offset",
+            "paste_jitter": str((synthesis.get("paste_jitter") or {}).get("preset", "off")),
             "ignore_rule": "none: every victim the baseline trains on stays a positive",
             "amodal_mask_caveat": "KITTI victim amodal masks use bounding-box proxies.",
         },
@@ -382,7 +399,7 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
             resolved = _resolve_placement(
                 event, victim_positions, victim_class, grouped_pool, synthesis,
                 target_size, sequence_length, rng, integral_cache,
-                identity_usage, used_in_sequence, scene.accepts,
+                identity_usage, used_in_sequence, scene.accepts, jitter_ranges,
             )
             if resolved is None:
                 rejected += 1
@@ -416,6 +433,7 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
                     peak_frame=int(best["peak_frame"]),
                     height_factor=float(best["height_factor"]),
                     lateral_offset_fraction=float(best["lateral_offset_fraction"]),
+                    jitters=tuple(best["jitters"]),
                 )
             )
             next_synth_track += 1
@@ -441,17 +459,19 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
                     continue
                 offset = position - sched.start_position
                 frame_record = sched.occluder.frames[offset]
+                jitter = sched.jitters[offset]
                 box = map_occluder_box(
                     frame_record,
                     (background.shape[1], background.shape[0]),
                     reference_height=sched.reference_height,
                     source_reference_height=sched.source_reference_height,
                     translation=sched.translation,
+                    jitter=jitter,
                 )
                 active.append(
                     TrackletLayer(
                         track_id=sched.synthetic_track_id,
-                        rgba=_load_rgba(frame_record["rgba_path"]),
+                        rgba=jitter_rgba(_load_rgba(frame_record["rgba_path"]), jitter),
                         bbox_xywh=box,
                         provenance={
                             "tracklet_id": int(sched.occluder.tracklet_id),
@@ -464,6 +484,7 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
                             "height_factor": sched.height_factor,
                             "lateral_offset_fraction": sched.lateral_offset_fraction,
                             "translation_xy": list(sched.translation),
+                            "paste_jitter": jitter.to_dict(),
                         },
                     )
                 )

@@ -23,6 +23,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from synth.paste_jitter import IDENTITY, FrameJitter, jitter_alpha, jitter_box
 from synth.placement import (
     AlphaIntegral,
     accept_event,
@@ -49,10 +50,16 @@ class AlphaIntegralCache:
 
     The tables do not depend on where a crop is pasted, so one pass over the pool
     serves every placement attempt and every retry.
+
+    Per-frame paste jitter breaks that sharing — a flipped or rotated mask is a
+    different mask — so a jittered request builds its table on the spot. The
+    decoded full-resolution alpha is still cached by path, which is where the cost
+    actually sits, so the extra work is the rotate plus the summed-area table.
     """
 
     def __init__(self, max_side: int = INTEGRAL_MAX_SIDE) -> None:
         self._cache: dict[str, AlphaIntegral] = {}
+        self._raw: dict[str, np.ndarray] = {}
         self._max_side = int(max_side)
 
     def __len__(self) -> int:
@@ -62,27 +69,53 @@ class AlphaIntegralCache:
         key = str(rgba_path)
         cached = self._cache.get(key)
         if cached is None:
-            cached = AlphaIntegral(self._load_alpha(key))
+            cached = AlphaIntegral(self._downsample(self._raw_alpha(key)))
             self._cache[key] = cached
         return cached
 
-    def for_frames(self, frames: Sequence[Mapping[str, Any]]) -> list[AlphaIntegral]:
-        return [self.get(frame["rgba_path"]) for frame in frames]
+    def get_jittered(self, rgba_path: str | Path, jitter: FrameJitter) -> AlphaIntegral:
+        if not (jitter.flip or jitter.rotation % 360 != 0):
+            # Scale rides on the box, and the photometric factors never touch
+            # alpha, so this crop's table is the shared unjittered one.
+            return self.get(rgba_path)
+        alpha = jitter_alpha(self._raw_alpha(str(rgba_path)), jitter)
+        return AlphaIntegral(self._downsample(alpha))
 
-    def _load_alpha(self, path: str) -> np.ndarray:
+    def for_frames(
+        self,
+        frames: Sequence[Mapping[str, Any]],
+        jitters: Sequence[FrameJitter] | None = None,
+    ) -> list[AlphaIntegral]:
+        if jitters is None:
+            return [self.get(frame["rgba_path"]) for frame in frames]
+        return [
+            self.get_jittered(frame["rgba_path"], jitter)
+            for frame, jitter in zip(frames, jitters)
+        ]
+
+    def _raw_alpha(self, path: str) -> np.ndarray:
+        cached = self._raw.get(path)
+        if cached is None:
+            from PIL import Image
+
+            with Image.open(path) as image:
+                cached = np.asarray(image.convert("RGBA").getchannel("A")).copy()
+            self._raw[path] = cached
+        return cached
+
+    def _downsample(self, alpha: np.ndarray) -> np.ndarray:
+        height, width = alpha.shape[:2]
+        longest = max(width, height)
+        if longest <= self._max_side:
+            return alpha
         from PIL import Image
 
-        with Image.open(path) as image:
-            alpha = image.convert("RGBA").getchannel("A")
-            width, height = alpha.size
-            longest = max(width, height)
-            if longest > self._max_side:
-                scale = self._max_side / longest
-                alpha = alpha.resize(
-                    (max(1, round(width * scale)), max(1, round(height * scale))),
-                    Image.Resampling.NEAREST,
-                )
-            return np.asarray(alpha)
+        scale = self._max_side / longest
+        resized = Image.fromarray(np.asarray(alpha, dtype=np.uint8)).resize(
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            Image.Resampling.NEAREST,
+        )
+        return np.asarray(resized)
 
 
 def map_occluder_box(
@@ -92,6 +125,7 @@ def map_occluder_box(
     reference_height: float,
     source_reference_height: float,
     translation: tuple[float, float] = (0.0, 0.0),
+    jitter: FrameJitter = IDENTITY,
 ) -> tuple[float, float, float, float]:
     """Map one occluder source crop into the target image.
 
@@ -100,6 +134,10 @@ def map_occluder_box(
     per-frame height scales with the source crop's own height (relative motion),
     and the box is anchored bottom-centre in normalised source coordinates, then
     shifted by ``translation``.
+
+    ``jitter`` grows the box by that frame's rotation expansion and scale, still
+    bottom-centre anchored. Callers must pass the same jitter here as they hand
+    the renderer, or the search would score a box the renderer never draws.
     """
     x, y, w, h = (float(value) for value in frame_record["crop_bbox_xywh"])
     source_width, source_height = (float(value) for value in frame_record["source_image_size"])
@@ -114,7 +152,10 @@ def map_occluder_box(
     bottom_fraction = (y + h) / source_height
     new_x = center_x_fraction * target_width - new_width / 2.0 + translation[0]
     new_y = bottom_fraction * target_height - new_height + translation[1]
-    return (new_x, new_y, new_width, new_height)
+    box = (new_x, new_y, new_width, new_height)
+    if jitter is IDENTITY or not jitter.changes_geometry:
+        return box
+    return jitter_box(box, (w, h), jitter)
 
 
 def alignment_translation(occluder_box: BBox, victim_box: BBox) -> tuple[float, float]:
@@ -138,6 +179,7 @@ def sample_event_placement(
     attempts: int = 24,
     accept_kwargs: Mapping[str, Any] | None = None,
     scene_check: Any = None,
+    jitters: Sequence[FrameJitter] | None = None,
 ) -> dict[str, Any] | None:
     """Draw physical parameters until one yields an acceptable occlusion event.
 
@@ -156,11 +198,19 @@ def sample_event_placement(
     an unrelated bystander — measured at 118 of 174 over-cap frames in a full run,
     none of them the occluder's intended victim.
 
+    ``jitters`` is the per-frame paste jitter, one entry per exposure frame, and
+    must be the sequence ``integrals`` were built from — the boxes below carry its
+    rotation expansion and scale, so search and render agree frame by frame.
+
     Returns ``None`` if no attempt passes.
     """
     exposure = len(occluder_frames)
     if exposure == 0:
         return None
+    if jitters is None:
+        jitters = [IDENTITY] * exposure
+    elif len(jitters) != exposure:
+        raise ValueError(f"jitters has {len(jitters)} entries for {exposure} exposure frames")
     peak_offset = exposure // 2
     source_reference_height = float(occluder_frames[peak_offset]["crop_bbox_xywh"][3])
     accept = dict(accept_kwargs or {})
@@ -185,6 +235,7 @@ def sample_event_placement(
             target_size,
             reference_height=reference_height,
             source_reference_height=source_reference_height,
+            jitter=jitters[peak_offset],
         )
         base_translation = alignment_translation(unshifted, victim_peak)
         span = offset_span(unshifted[2], float(victim_peak[2]))
@@ -198,6 +249,7 @@ def sample_event_placement(
                 reference_height=reference_height,
                 source_reference_height=source_reference_height,
                 translation=translation,
+                jitter=jitters[offset],
             )
             for offset in range(exposure)
         ]
