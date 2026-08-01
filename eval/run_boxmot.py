@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -35,6 +35,41 @@ EPOCH_CKPT = {
 }
 
 
+# KITTI label types that must not be scored as background. Its devkit removes
+# detections landing on these instead of counting them as false positives —
+# "do not count Vans as false positives for cars or Sitting Persons as wrong
+# positives for Pedestrians due to their similarity in appearance. (All ignored
+# objects are considered as DontCare areas.)" — because they are either
+# unlabelled regions or a near-duplicate of an evaluated class.
+#
+# ``classes.kitti_map`` drops them at conversion, which left them as plain
+# background: a detection there had no gt to match and became a false positive.
+# Measured on the eval split, that was 53.8% of unmatched person detections and
+# 51.6% of car ones.
+#
+# Value is the classes the region applies to; ``None`` means every class. Van is
+# deliberately absent — this project maps it to ``car`` as a positive, which is a
+# knowing departure from KITTI's protocol, not an oversight.
+IGNORE_REGIONS: dict[str, tuple[str, ...] | None] = {
+    "DontCare": None,
+    # KITTI Tracking writes "Person" where the object benchmark writes
+    # "Person_sitting"; classes.kitti_map only lists the latter, so neither the
+    # map nor this table can rely on just one spelling.
+    "Person": ("person",),
+    "Person_sitting": ("person",),
+}
+
+# TrackEval's MOTChallenge preprocessing matches tracker dets against every gt
+# row and drops the ones that land on a distractor class, so ignore rows are
+# written with this class id. Real gt keeps id 1 (pedestrian), and the distractor
+# rows are dropped from the gt set before the metrics are computed.
+TRACKEVAL_DISTRACTOR_CLASS = 8  # 'distractor' in MotChallenge2DBox
+TRACKEVAL_PEDESTRIAN_CLASS = 1
+# gt track ids only have to be unique within a timestep; KITTI's are small
+# non-negative ints, so this offset cannot collide with them.
+IGNORE_ID_BASE = 900000
+
+
 def _experiment_dir_name(
     condition: str, aug: str, seed: int, paste_mode: str | None = None, tag: str | None = None
 ) -> str:
@@ -57,6 +92,35 @@ def _checkpoint_path(
 ) -> Path:
     output = resolve_path(path.parent, config["train"]["output_dir"])
     return output / _experiment_dir_name(condition, aug, seed, paste_mode, tag) / EPOCH_CKPT[epoch]
+
+
+def _ignore_regions_by_frame(
+    kitti_root: Path, sequence: str, class_names: Sequence[str]
+) -> dict[int, list[tuple[str, list[float]]]]:
+    """KITTI ignore boxes for one sequence, keyed by 1-based frame number.
+
+    Read straight from the raw labels rather than the converted dataset: these
+    rows are an evaluation-protocol concern, and routing them through the COCO
+    conversion would put them in front of the *training* set builders too.
+    """
+    from data.kitti_tracking import load_sequence_labels
+
+    regions: dict[int, list[tuple[str, list[float]]]] = {}
+    for frame_index, objects in load_sequence_labels(kitti_root / "training" / "label_02" / f"{sequence}.txt").items():
+        for obj in objects:
+            if obj.category not in IGNORE_REGIONS:
+                continue
+            applies_to = IGNORE_REGIONS[obj.category]
+            x1, y1, x2, y2 = obj.bbox_xyxy
+            if x2 - x1 <= 1.0 or y2 - y1 <= 1.0:
+                continue
+            for name in class_names if applies_to is None else applies_to:
+                if name not in class_names:
+                    continue
+                regions.setdefault(frame_index + 1, []).append(
+                    (name, [x1, y1, x2 - x1, y2 - y1])
+                )
+    return regions
 
 
 def _load_model(
@@ -251,9 +315,11 @@ def run(
         import cv2
     except ImportError as exc:
         raise RuntimeError("opencv-python is required") from exc
+    kitti_root = config_path(config, path, "paths", "kitti_tracking")
     for video_id, frames in sorted(frames_by_video.items()):
         tracker = create_boxmot_bytetrack(config["tracker"], class_names)
         sequence = str(video_by_id[video_id]["name"])
+        ignore_by_frame = _ignore_regions_by_frame(kitti_root, sequence, class_names)
         for frame in frames:
             frame_number = int(frame["frame_index"]) + 1
             image = cv2.imread(str(dataset_root / frame["file_name"]))
@@ -278,7 +344,14 @@ def run(
                     continue
                 x, y, width, height = (float(value) for value in annotation["bbox"])
                 gt_rows[name][sequence].append(
-                    f"{frame_number},{int(annotation['track_id'])},{x:.2f},{y:.2f},{width:.2f},{height:.2f},1,1,1\n"
+                    f"{frame_number},{int(annotation['track_id'])},{x:.2f},{y:.2f},"
+                    f"{width:.2f},{height:.2f},1,{TRACKEVAL_PEDESTRIAN_CLASS},1\n"
+                )
+            for offset, (name, box) in enumerate(ignore_by_frame.get(frame_number, [])):
+                x, y, width, height = box
+                gt_rows[name][sequence].append(
+                    f"{frame_number},{IGNORE_ID_BASE + offset},{x:.2f},{y:.2f},"
+                    f"{width:.2f},{height:.2f},1,{TRACKEVAL_DISTRACTOR_CLASS},1\n"
                 )
 
     output_root = resolve_path(path.parent, config["tracker"]["output_dir"]) / run_name
@@ -308,8 +381,13 @@ def run(
             *layout["sequences"],
             "--TRACKERS_TO_EVAL",
             run_name,
+            # On: TrackEval then matches tracker dets against every gt row and
+            # drops the ones landing on a distractor (KITTI DontCare / sitting
+            # person), which is what makes those regions ignored rather than
+            # background. Real gt matches win the assignment first, so a
+            # detection on an actual object is never removed by this.
             "--DO_PREPROC",
-            "False",
+            "True",
             "--METRICS",
             "HOTA",
             "CLEAR",
@@ -328,6 +406,10 @@ def run(
         "tag": tag,
         "checkpoint": str(checkpoint),
         "tracker": "BoxMOT ByteTrack (ReID disabled)",
+        # Which protocol produced these numbers: results from before ignore
+        # regions existed are not comparable with results from after.
+        "ignore_regions": sorted(IGNORE_REGIONS),
+        "trackeval_do_preproc": True,
         "output_dir": str(output_root),
         "trackeval_commands": metric_commands,
     }
