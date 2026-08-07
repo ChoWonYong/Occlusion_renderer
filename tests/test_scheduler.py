@@ -5,6 +5,7 @@ from collections import Counter
 from synth.scheduler import (
     EventPlan,
     PoolTracklet,
+    identity_available,
     merge_pools,
     paste_exposure_length,
     plan_schedule,
@@ -88,16 +89,51 @@ class SelectVictimsTest(unittest.TestCase):
 
 
 class SampleOccludersTest(unittest.TestCase):
-    def test_reuse_cap_and_overflow(self) -> None:
-        grouped = {"car": [_tracklet(1, "car", "KITTI", "0000", 1), _tracklet(2, "car", "KITTI", "0000", 2)]}
+    def _grouped(self) -> dict[str, list[PoolTracklet]]:
+        return {
+            "car": [_tracklet(1, "car", "KITTI", "0000", 1), _tracklet(2, "car", "KITTI", "0000", 2)]
+        }
+
+    def test_no_identity_repeats_within_one_sequence(self) -> None:
         chosen, over_cap = sample_occluders(
-            ["car"] * 5, grouped, random.Random(0), max_per_identity=2
+            ["car"] * 2, self._grouped(), random.Random(0), max_per_identity=2
+        )
+        self.assertEqual(len(chosen), 2)
+        self.assertEqual(over_cap, 0)
+        self.assertEqual(len({t.identity_key for t in chosen}), 2)
+
+    def test_overflow_reported_when_the_pool_is_exhausted(self) -> None:
+        # only two identities but five picks: the same-sequence rule forces the
+        # last three over, and they are reported rather than silently allowed
+        chosen, over_cap = sample_occluders(
+            ["car"] * 5, self._grouped(), random.Random(0), max_per_identity=2
         )
         self.assertEqual(len(chosen), 5)
-        # two identities, cap 2 -> 4 within cap, 1 forced over the cap
-        self.assertEqual(over_cap, 1)
-        usage = Counter(t.identity_key for t in chosen)
-        self.assertEqual(max(usage.values()), 3)
+        self.assertEqual(over_cap, 3)
+
+    def test_global_cap_carries_across_sequences(self) -> None:
+        grouped = self._grouped()
+        usage: dict = {}
+        for _ in range(2):  # two "sequences", fresh exclusion set each time
+            sample_occluders(
+                ["car"] * 2, grouped, random.Random(0), max_per_identity=2, usage=usage
+            )
+        self.assertEqual(sorted(usage.values()), [2, 2])
+        # a third sequence has nothing left within the cap
+        chosen, over_cap = sample_occluders(
+            ["car"] * 2, grouped, random.Random(0), max_per_identity=2, usage=usage
+        )
+        self.assertEqual(over_cap, 2)
+
+
+class IdentityAvailabilityTest(unittest.TestCase):
+    def test_blocked_by_either_rule(self) -> None:
+        tracklet = _tracklet(1, "car", "KITTI", "0000", 1)
+        self.assertTrue(identity_available(tracklet, {}, set(), 2))
+        # already used in this sequence
+        self.assertFalse(identity_available(tracklet, {}, {tracklet.identity_key}, 2))
+        # global cap reached
+        self.assertFalse(identity_available(tracklet, {tracklet.identity_key: 2}, set(), 2))
 
 
 class PasteExposureTest(unittest.TestCase):
@@ -126,51 +162,53 @@ class PlanScheduleTest(unittest.TestCase):
     def _frames(self, victim_ids: list[int], frame_count: int) -> list[list[dict]]:
         return [[_victim_frame(tid) for tid in victim_ids] for _ in range(frame_count)]
 
-    def test_events_capped_by_distinct_victims_one_per_victim(self) -> None:
-        frames = self._frames([1, 2, 3, 4], frame_count=200)  # target 6, victims 4
-        synthesis = {
+    def _synthesis(self) -> dict:
+        return {
             "class_ratio": {"car": 0.6, "person": 0.3, "bicycle": 0.1},
             "victim_events_per_100_frames": 3.0,
             "tracklet_min_frames": 30,
             "max_per_identity": 2,
-            "double_occluder_probability": 0.15,
-            "boundary_shift_count": 2,
-            "boundary_events_are_auxiliary": True,
             "effective_event_frames": [8, 20],
             "victim_min_area": 400.0,
             "victim_max_base_occlusion": 0,
         }
-        result = plan_schedule(frames, self._pool(), synthesis, random.Random(7))
+
+    def test_events_capped_by_distinct_victims_one_per_victim(self) -> None:
+        frames = self._frames([1, 2, 3, 4], frame_count=200)  # target 6, victims 4
+        result = plan_schedule(frames, self._pool(), self._synthesis(), random.Random(7))
         summary = result["summary"]
         self.assertEqual(summary["target_victim_events"], 6)
         self.assertEqual(summary["distinct_eligible_victims"], 4)
         self.assertEqual(summary["victim_events"], 4)  # capped by victims
-        self.assertEqual(summary["boundary_events"], 2)
 
-        victim_events = [e for e in result["events"] if e.kind == "victim"]
-        victim_ids = [e.victim_track_id for e in victim_events]
+        victim_ids = [e.victim_track_id for e in result["events"]]
         self.assertEqual(len(set(victim_ids)), 4)  # one event per victim, all distinct
-        self.assertEqual(
-            Counter(e.occluder.category for e in victim_events),
-            Counter({"car": 3, "person": 1}),
-        )
         for event in result["events"]:
+            self.assertEqual(event.kind, "victim")
             self.assertTrue(30 <= event.exposure_length <= event.occluder.length)
 
-    def test_boundary_events_are_auxiliary_and_have_sides(self) -> None:
-        frames = self._frames([1], frame_count=100)  # only one victim
-        synthesis = {
-            "class_ratio": {"car": 0.6, "person": 0.3, "bicycle": 0.1},
-            "victim_events_per_100_frames": 3.0,
-            "tracklet_min_frames": 30,
-            "boundary_shift_count": 2,
-            "boundary_events_are_auxiliary": True,
-        }
-        result = plan_schedule(frames, self._pool(), synthesis, random.Random(1))
-        self.assertEqual(result["summary"]["victim_events"], 1)  # capped to the single victim
-        boundary = [e for e in result["events"] if e.kind == "boundary"]
-        self.assertEqual({e.boundary_side for e in boundary}, {"left", "right"})
-        self.assertTrue(all(e.victim_track_id is None for e in boundary))
+    def test_no_boundary_events_are_planned(self) -> None:
+        """Boundary/truncation events were removed: they were never rendered."""
+        frames = self._frames([1, 2, 3, 4], frame_count=200)
+        result = plan_schedule(frames, self._pool(), self._synthesis(), random.Random(7))
+        self.assertTrue(all(event.kind == "victim" for event in result["events"]))
+        self.assertTrue(all(event.victim_track_id is not None for event in result["events"]))
+        self.assertNotIn("boundary_events", result["summary"])
+
+    def test_identities_are_unique_within_a_sequence(self) -> None:
+        frames = self._frames([1, 2, 3, 4], frame_count=200)
+        result = plan_schedule(frames, self._pool(), self._synthesis(), random.Random(7))
+        identities = [event.occluder.identity_key for event in result["events"]]
+        self.assertEqual(len(identities), len(set(identities)))
+        self.assertEqual(result["used_identities"], set(identities))
+
+    def test_global_usage_map_is_shared_across_calls(self) -> None:
+        frames = self._frames([1, 2, 3, 4], frame_count=200)
+        usage: dict = {}
+        plan_schedule(frames, self._pool(), self._synthesis(), random.Random(7), usage=usage)
+        first = sum(usage.values())
+        plan_schedule(frames, self._pool(), self._synthesis(), random.Random(8), usage=usage)
+        self.assertGreater(sum(usage.values()), first)
 
 
 if __name__ == "__main__":

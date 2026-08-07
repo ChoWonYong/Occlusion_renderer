@@ -1,0 +1,17 @@
+# Phase-1 treatment arm with weak per-frame jitter on the pasted occluder crops.
+# Everything else — pool, scheduling, occlusion policy, split, training schedule —
+# is inherited from phase1_kitti.yaml, so this arm differs from the trained
+# phase1_treatment_replace_full runs only by the jitter.
+#
+# Separate output directories on purpose: regenerating in place would overwrite
+# the synthetic frames and the treatment json the no-jitter arm was trained on.
+base: phase1_kitti.yaml
+
+tracklet_synthesis:
+  output_dir: ../artifacts/phase1/tracklet_synthetic_pastejit_low
+  paste_jitter:
+    preset: low
+
+dataset:
+  synthetic_output_dir: ../artifacts/phase1/tracklet_synthetic_pastejit_low
+  output_dir: ../artifacts/phase1/yolox_data_pastejit_low

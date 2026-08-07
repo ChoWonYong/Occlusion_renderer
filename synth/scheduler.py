@@ -2,22 +2,30 @@
 
 This module decides *what* to paste and *how much*, decoupled from the heavy
 rendering loop. It merges the multi-class tracklet pools, sizes the number of
-victim events by sequence length, assigns occluder tracklets by the confirmed
-class ratio with an identity-reuse cap, samples the paste-exposure length, and
-flags the ~15% of events allowed to run concurrently.
+victim events by sequence length, assigns occluder tracklets by the configured
+class ratio under the identity-reuse rules, and samples the paste-exposure
+length.
 
-The exact temporal placement and the translation/scale that realise a target
-peak rho are resolved later, in the Step-5 placement search. Here we only
-produce the assignments and the concurrency budget.
+Where the event actually lands and how strongly it occludes are resolved later,
+in the generative placement sampling (``synth.placement`` + ``synth.geometry``).
+Here we only produce the assignments.
 
-Confirmed policy (2026-07-23):
+Confirmed policy (2026-07-23, revised 2026-07-27):
 - victim events per 100 frames = 3, capped by the number of distinct clean
   victim tracks, one event per victim (no victim reuse);
-- occluder class ratio car/person/bicycle = 60/30/10 (truck excluded);
-- occluder identity reuse capped by ``max_per_identity``;
+- occluder class ratio car/person = 65/35 (truck and bicycle excluded);
+- occluder identity reuse: at most ``max_per_identity`` across the whole run and
+  never twice within one background sequence. The caller passes a persistent
+  ``usage`` map so the cap survives across sequences and across the placement
+  retries in ``synth.event_pipeline`` — those retries previously bypassed it,
+  which let a single identity appear three times;
 - paste exposure L ~ uniform[tracklet_min, tracklet_length];
-- max 2 concurrent occluders, ~15% of events allowed concurrent;
-- boundary-shift events are auxiliary and do not consume the victim quota.
+- concurrency is enforced per victim by the pipeline, not as a global
+  frame budget (2026-07-27: the global counter discarded 44% of successfully
+  placed events and left an average of 0.52 occluders on screen);
+- boundary-shift (truncation) events were removed on 2026-07-27: they were
+  planned here but never rendered, and they are a different augmentation axis
+  that would confound the occlusion A/B.
 """
 
 from __future__ import annotations
@@ -52,13 +60,11 @@ class VictimTrack:
 
 @dataclass
 class EventPlan:
-    kind: str                       # "victim" | "boundary"
+    kind: str                       # "victim" (boundary events were removed 2026-07-27)
     occluder: PoolTracklet
     exposure_length: int
     victim_track_id: int | None = None
     victim_category_id: int | None = None
-    boundary_side: str | None = None
-    allow_concurrent: bool = False
 
 
 def merge_pools(metadatas: Sequence[Mapping[str, Any]]) -> list[PoolTracklet]:
@@ -175,6 +181,28 @@ def sample_categories(count: int, class_ratio: Mapping[str, float], rng: random.
     return result
 
 
+def identity_available(
+    tracklet: PoolTracklet,
+    usage: Mapping[tuple[Any, ...], int],
+    used_in_sequence: Sequence[tuple[Any, ...]] | set[tuple[Any, ...]],
+    max_per_identity: int,
+) -> bool:
+    """Both reuse rules: global cap, and never twice in one background sequence."""
+    if tracklet.identity_key in used_in_sequence:
+        return False
+    return usage.get(tracklet.identity_key, 0) < max_per_identity
+
+
+def claim_identity(
+    tracklet: PoolTracklet,
+    usage: dict[tuple[Any, ...], int],
+    used_in_sequence: set[tuple[Any, ...]],
+) -> None:
+    """Record a tracklet as used so later picks and retries see it."""
+    usage[tracklet.identity_key] = usage.get(tracklet.identity_key, 0) + 1
+    used_in_sequence.add(tracklet.identity_key)
+
+
 def sample_occluders(
     categories: Sequence[str],
     grouped_pool: Mapping[str, list[PoolTracklet]],
@@ -182,15 +210,18 @@ def sample_occluders(
     *,
     max_per_identity: int,
     usage: dict[tuple[Any, ...], int] | None = None,
+    used_in_sequence: set[tuple[Any, ...]] | None = None,
 ) -> tuple[list[PoolTracklet], int]:
-    """Pick one tracklet per requested category, respecting the reuse cap.
+    """Pick one tracklet per requested category, respecting both reuse rules.
 
-    ``usage`` (identity_key -> count) can be shared across calls so that victim
-    and boundary events draw from a common reuse budget. Returns the chosen
-    tracklets and the number of picks that had to exceed the cap because the
+    ``usage`` (identity_key -> count) is shared across sequences so the global cap
+    holds for the whole run; ``used_in_sequence`` is reset per background sequence
+    so the same real object never appears twice in one clip. Returns the chosen
+    tracklets and the number of picks that had to break a rule because the
     category pool was saturated.
     """
     usage = {} if usage is None else usage
+    used_in_sequence = set() if used_in_sequence is None else used_in_sequence
     shuffled = {category: rng.sample(items, len(items)) for category, items in grouped_pool.items()}
     cursor = {category: 0 for category in shuffled}
     chosen: list[PoolTracklet] = []
@@ -204,14 +235,14 @@ def sample_occluders(
         for step in range(size):
             index = (cursor[category] + step) % size
             candidate = pool[index]
-            if usage.get(candidate.identity_key, 0) < max_per_identity:
+            if identity_available(candidate, usage, used_in_sequence, max_per_identity):
                 pick = candidate
                 cursor[category] = (index + 1) % size
                 break
         if pick is None:
             pick = min(pool, key=lambda tracklet: usage.get(tracklet.identity_key, 0))
             over_cap += 1
-        usage[pick.identity_key] = usage.get(pick.identity_key, 0) + 1
+        claim_identity(pick, usage, used_in_sequence)
         chosen.append(pick)
     return chosen, over_cap
 
@@ -228,11 +259,16 @@ def plan_schedule(
     pool: Sequence[PoolTracklet],
     synthesis: Mapping[str, Any],
     rng: random.Random,
+    usage: dict[tuple[Any, ...], int] | None = None,
 ) -> dict[str, Any]:
     """Produce the occlusion-event plan for one background sequence.
 
-    Returns a dict with the ``events`` (list[EventPlan]) and a ``summary`` of the
-    scheduling decisions for QC.
+    Pass the same ``usage`` map on every call so the global identity cap applies
+    across the whole run; the per-sequence exclusion set is created here and
+    returned so the pipeline's placement retries obey the same rules.
+
+    Returns a dict with the ``events`` (list[EventPlan]), the per-sequence
+    ``used_identities`` set, and a ``summary`` of the scheduling decisions.
     """
     frame_count = len(frames_annotations)
     class_ratio = dict(synthesis["class_ratio"])
@@ -254,10 +290,16 @@ def plan_schedule(
     event_count = min(target, len(victims)) if cap_to_victims else target
     chosen_victims = rng.sample(victims, event_count) if event_count <= len(victims) else list(victims)
 
-    usage: dict[tuple[Any, ...], int] = {}
+    usage = {} if usage is None else usage
+    used_in_sequence: set[tuple[Any, ...]] = set()
     categories = sample_categories(event_count, class_ratio, rng)
     occluders, over_cap = sample_occluders(
-        categories, grouped, rng, max_per_identity=max_per_identity, usage=usage
+        categories,
+        grouped,
+        rng,
+        max_per_identity=max_per_identity,
+        usage=usage,
+        used_in_sequence=used_in_sequence,
     )
 
     events: list[EventPlan] = []
@@ -272,37 +314,8 @@ def plan_schedule(
             )
         )
 
-    # ~double_occluder_probability of the victim events may run concurrently.
-    double_probability = float(synthesis.get("double_occluder_probability", 0.15))
-    concurrent_count = int(math.floor(len(events) * double_probability))
-    for event in rng.sample(events, concurrent_count) if concurrent_count else []:
-        event.allow_concurrent = True
-
-    # Boundary-shift events are auxiliary: they do not consume the victim quota.
-    boundary_events: list[EventPlan] = []
-    if bool(synthesis.get("boundary_events_are_auxiliary", True)):
-        boundary_max = int(synthesis.get("boundary_shift_count", 2))
-        boundary_sides = ["left", "right"][: max(0, min(2, boundary_max))]
-        if boundary_sides:
-            boundary_categories = sample_categories(len(boundary_sides), class_ratio, rng)
-            boundary_occluders, boundary_over = sample_occluders(
-                boundary_categories, grouped, rng, max_per_identity=max_per_identity, usage=usage
-            )
-            over_cap += boundary_over
-            for side, occluder in zip(boundary_sides, boundary_occluders):
-                boundary_events.append(
-                    EventPlan(
-                        kind="boundary",
-                        occluder=occluder,
-                        exposure_length=paste_exposure_length(occluder.length, rng, min_frames=min_frames),
-                        boundary_side=side,
-                        allow_concurrent=True,
-                    )
-                )
-
-    all_events = events + boundary_events
     actual_class_counts: dict[str, int] = {}
-    for event in all_events:
+    for event in events:
         actual_class_counts[event.occluder.category] = actual_class_counts.get(event.occluder.category, 0) + 1
 
     summary = {
@@ -310,11 +323,9 @@ def plan_schedule(
         "target_victim_events": target,
         "distinct_eligible_victims": len(victims),
         "victim_events": len(events),
-        "boundary_events": len(boundary_events),
-        "concurrent_flagged": concurrent_count,
-        "max_concurrent_occluders": int(synthesis.get("max_concurrent_occluders", 2)),
+        "max_occluders_per_victim": int(synthesis.get("max_occluders_per_victim", 2)),
         "class_distribution": dict(sorted(actual_class_counts.items())),
         "identity_reuse_over_cap": over_cap,
-        "distinct_occluder_identities": len({event.occluder.identity_key for event in all_events}),
+        "distinct_occluder_identities": len({event.occluder.identity_key for event in events}),
     }
-    return {"events": all_events, "summary": summary}
+    return {"events": events, "used_identities": used_in_sequence, "summary": summary}

@@ -90,33 +90,56 @@ tracklet_synthesis:
   cap_events_to_distinct_victims: true
   one_event_per_victim: true
   victim_tracklet_assignment: random
-  max_concurrent_occluders: 2
-  double_occluder_probability: 0.15
-  boundary_events_are_auxiliary: true
+  # 2026-07-27: concurrency is a per-victim budget. The old global frame counter
+  # (max 2, but effectively 1 for the 85% of events not flagged concurrent)
+  # discarded 44% of successfully placed events and left an average of 0.52
+  # occluders on screen; which events survived was decided by iteration order.
+  max_occluders_per_victim: 2
   effective_event_frames: [8, 20]    # rho >= 0.1 run length
-  peak_rho_max: 0.80                  # reject/resample above
-  peak_rho_distribution:
-    mild: 0.20                        # band 0.20-0.35
-    moderate: 0.55                    # band 0.35-0.65
-    heavy: 0.25                       # band 0.65-0.80
-  rho_method: bbox_proxy              # victim uses bbox as amodal proxy (no SAM3)
+  # 2026-07-28: capped below full occlusion. This synthetic data trains the
+  # *detector* only — ByteTrack is never trained on it — so a frame with zero
+  # visible pixels is not a tracking challenge, it is an unlearnable target
+  # ("predict the full box from no evidence") under amodal_original. Measured at
+  # 1.00: 6 of 96 events peaked above 0.90 and alone produced all 260
+  # fully-covered frames, because an event that reaches 1.0 sits there for many
+  # frames. Capping re-draws those 6 at a lower lateral offset; events still
+  # reach 0.85-0.90, far past what the previous dataset could produce (~0.55).
+  peak_rho_max: 0.90
+  event_gate_floor: 0.20              # below this the event is not worth rendering
+  # rho is the fraction of the victim box covered by the occluder's real mask,
+  # via a per-frame integral image. The old bbox proxy over-stated it by
+  # 0.40-0.72x depending on occluder class (KITTI car 0.72, MOT17 person 0.59,
+  # KITTI person 0.40), so occlusion strength was confounded with occluder class.
+  rho_method: occluder_mask_integral
   # truck AND bicycle excluded from occluder pool (KITTI data scarcity); head stays 4-class.
   class_ratio: {car: 0.65, person: 0.35}
   victim_detector_bbox_policy: amodal_original
-  # --- 2026-07-23 victim-relative sizing (Step 5) ---
-  # occluder target height = victim_height * (factor[occluder]/factor[victim]).
-  # Canonical heights relative to car=1.0; truck is victim-side only.
-  scale_mode: victim_relative
-  class_height_factor: {car: 1.0, truck: 1.8, person: 1.2, bicycle: 0.9}
-  # placement nudges scale within these multipliers of the canonical height to
-  # reach the target peak rho while staying realistic.
-  scale_search_multipliers: [0.80, 0.90, 1.00, 1.15, 1.30]
+  # --- 2026-07-27 generative sizing + lateral-offset rho control ---
+  # occluder target height = victim_height * factor[occluder]/factor[victim],
+  # with factor drawn per event from the class's real-world height spread
+  # (car 1.5 m = 1.0). Difficulty is no longer targeted, so size never has to
+  # leave the plausible range to hit a number.
+  scale_mode: class_height_range_sampled
+  class_height_range:
+    car: [0.90, 1.10]
+    truck: [1.70, 1.90]
+    person: [1.10, 1.30]
+    bicycle: [0.80, 1.00]
+  # Lateral offset in units of (w_occluder + w_victim)/2 — the separation at which
+  # the boxes stop overlapping. This is the rho degree of freedom: sliding
+  # sideways keeps the occluder at the victim's depth, so it costs nothing in
+  # plausibility, and it reaches every band for every class pair.
+  max_lateral_offset_fraction: 1.15
+  placement_draws: 24                 # parameter draws per tracklet before giving up
+  placement_max_tracklets: 8          # alternative tracklets before dropping the event
   event_end_rho_max: 0.05             # rho at the event's first/last frame
-  # --- legacy demo/smoke keys (still consumed until Steps 4-6 land) ---
+  # 2026-07-28: no ignore rule. Marking heavily occluded victims iscrowd=1 does
+  # not create an ignore region here — MOTDataset drops them and SimOTA then
+  # trains objectness 0 at that location, i.e. an explicit negative. That both
+  # contradicts victim_detector_bbox_policy=amodal_original and deletes labels
+  # the baseline trains on. Every victim stays a positive with its amodal box.
+  # --- legacy demo/smoke keys (deprecated tracklet_pipeline only) ---
   tracklets_per_sequence: [2, 4]
-  # CCP-style boundary exceptions are capped at two (left and right).
-  boundary_shift_count: 2
-  boundary_visible_fraction: 0.6
   position_mode: normalized_source
   # NOTE: scale_mode is set once above to victim_relative (Step 5). The old
   # kitti_person_bbox_height_mean_std path is retired; these reference keys are
@@ -133,6 +156,25 @@ tracklet_synthesis:
   paste_order: large_first
   # Hard paste is the experiment default. Alpha blending is intentionally deferred.
   blend_method: none
+  # Per-frame appearance jitter on the pasted crop (synth/paste_jitter.py): every
+  # frame of a pasted tracklet gets its own colour/brightness/contrast/sharpness/
+  # flip/scale/rotation draw. flip, rotation and scale change the alpha mask and
+  # therefore rho, so the jitter is drawn *before* the placement search rather
+  # than at render time — turning it on changes which events pass the gate, not
+  # just how the pixels look.
+  #
+  # 2026-08-01: default is now "mid". Measured on KITTI eval, ep60, 3 seeds:
+  # HOTA 55.78 +- 0.38 (off) -> 56.20 +- 0.34 (low) -> 56.69 +- 0.15 (mid), with
+  # the gain concentrated in the two classes the occluder pool draws from
+  # (person +1.90, car +0.57). Every mid seed beat every off seed.
+  #
+  # NOTE: with jitter on by default, re-running kds-synth-events with *this*
+  # config rewrites artifacts/phase1/tracklet_synthetic — which currently holds
+  # the no-jitter frames the phase1_treatment_replace_full runs were trained on.
+  # Use configs/phase1_kitti_nojitter.yaml to regenerate that arm instead.
+  paste_jitter:
+    # Quoted: YAML 1.1 parses a bare off/no/false as a boolean.
+    preset: mid                       # off | low | mid | high (ranges may be overridden)
 
 synthesis:
   output_dir: ../artifacts/phase1/synthetic
@@ -151,10 +193,29 @@ dataset:
   output_dir: ../artifacts/phase1/yolox_data
   synthetic_output_dir: ../artifacts/phase1/tracklet_synthetic
   finetune_train_json: annotations/kitti_train.json
+  # 2026-07-27: the baseline is the plain original KITTI train split. Copy-paste
+  # occlusion IS the method, so the arms differ only by it; mosaic/mixup/flip/HSV
+  # are identical and applied online by the trainer. The old equal-budget
+  # flip/jitter padding was removed — it existed to match image counts, but it
+  # made the baseline a different augmentation rather than no augmentation.
   baseline_train_json: annotations/baseline_train.json
-  treatment_train_json: annotations/treatment_train.json
   eval_json: annotations/eval.json
-  equal_budget_augmentation: [horizontal_flip, color_jitter]
+  # replace (default): paste frames swap in for their source frames, so treatment
+  #   and baseline have the same image and iteration budget and only the pixels
+  #   differ.
+  # append: paste frames are added on top, so treatment sees ~1.6x the images and
+  #   gradient steps — and the same background then appears twice, once clean and
+  #   once pasted.
+  # 2026-07-28 measured (seed 0, vs baseline 55.39 ± 0.10 over 3 seeds):
+  #   replace HOTA 56.21 (+0.82), append HOTA 55.12 (-0.27). Adding frames was
+  #   worse than the baseline despite 1.6x the training budget, and AssA fell the
+  #   most (60.19 vs 61.05), consistent with duplicated backgrounds hurting
+  #   association. Hence replace is the default.
+  paste_mode: replace
+  paste_probability: 1.0              # per connected component, replace mode only
+  treatment_train_json: annotations/treatment_train.json
+  treatment_append_train_json: annotations/treatment_append_train.json
+  treatment_replace_train_json: annotations/treatment_replace_train.json
 
 train:
   model: yolox_x

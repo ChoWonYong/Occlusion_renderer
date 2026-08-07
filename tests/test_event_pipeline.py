@@ -78,20 +78,25 @@ class EventPipelineIntegrationTest(unittest.TestCase):
                     "output_dir": str(root / "out"),
                     "max_sequences": 1,
                     "class_ratio": {"person": 1.0},
-                    "class_height_factor": {"car": 1.0, "truck": 1.8, "person": 1.2, "bicycle": 0.9},
-                    "scale_search_multipliers": [1.0],
-                    "peak_rho_distribution": {"moderate": 1.0},
+                    "class_height_range": {
+                        "car": [0.9, 1.1],
+                        "truck": [1.7, 1.9],
+                        "person": [1.1, 1.3],
+                        "bicycle": [0.8, 1.0],
+                    },
+                    "max_lateral_offset_fraction": 1.15,
+                    "placement_draws": 64,
+                    "placement_max_tracklets": 4,
                     "victim_events_per_100_frames": 3.0,
                     "tracklet_min_frames": 20,
                     "effective_event_frames": [8, 20],
-                    "peak_rho_max": 0.80,
+                    "peak_rho_max": 1.00,
+                    "event_gate_floor": 0.20,
                     "event_end_rho_max": 0.05,
                     "victim_detector_bbox_policy": "amodal_original",
                     "victim_min_area": 100,
                     "victim_max_base_occlusion": 0,
-                    "max_concurrent_occluders": 2,
-                    "double_occluder_probability": 0.0,
-                    "boundary_events_are_auxiliary": False,
+                    "max_occluders_per_victim": 2,
                     "blend_method": "none",
                 },
             }
@@ -107,7 +112,13 @@ class EventPipelineIntegrationTest(unittest.TestCase):
             tracks = load_json(root / "out" / "occluder_tracks.json")
             self.assertEqual(tracks[0]["category"], "person")
             self.assertEqual(tracks[0]["exposure_length"], 20)
-            self.assertTrue(0.35 <= tracks[0]["achieved_peak"] <= 0.65)
+            # difficulty is derived, so only the gate is asserted, not a band
+            self.assertGreaterEqual(tracks[0]["achieved_peak"], 0.20)
+            self.assertLessEqual(tracks[0]["achieved_peak"], 1.0)
+            self.assertIn(tracks[0]["band"], {"mild", "moderate", "heavy"})
+            # the sampled size stays inside the class's physical range
+            self.assertTrue(1.1 <= tracks[0]["height_factor"] <= 1.3)
+            self.assertTrue(abs(tracks[0]["lateral_offset_fraction"]) <= 1.15)
 
             dataset = load_json(root / "out" / "annotations.json")
             # victim annotations keep the amodal (original) box as the detector bbox
@@ -117,7 +128,20 @@ class EventPipelineIntegrationTest(unittest.TestCase):
                 and float(a.get("occlusion_ratio", 0)) > 0
             )
             self.assertEqual(victim["bbox"], victim["amodal_bbox"])
-            self.assertNotEqual(victim["bbox"], victim["visible_bbox"])
+            # The visible *bbox* can still equal the amodal one when the occluder
+            # cuts through the middle and leaves pixels on both sides, so compare
+            # areas rather than boxes. ``area`` tracks the detector target (the
+            # amodal box); ``visible_area`` is what the paste actually left.
+            self.assertLess(int(victim["visible_area"]), int(victim["area"]))
+
+            # no victim is dropped from training, however heavily it is covered:
+            # MOTDataset skips iscrowd != 0 and area == 0, and those become
+            # negatives rather than ignore regions
+            for annotation in dataset["annotations"]:
+                if annotation.get("synthetic_occluder") is True:
+                    continue
+                self.assertEqual(annotation["iscrowd"], 0)
+                self.assertGreater(int(annotation["area"]), 0)
 
             # at least one event was derived
             events = load_json(root / "out" / "events.json")

@@ -144,7 +144,10 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
             pool_record = _weighted_pool_instance(pool_records, config["occluder_class_dist"], rng)
             rgba = _load_rgba(pool_dir / pool_record["file_name"])
             rgba, augmentation = augment_identity(rgba, rng)
-            target_category = config["classes"]["coco_map"].get(pool_record["category"])
+            # Pool records already carry project class names (the builders resolve
+            # them through classes.kitti_map), so this only has to reject a class
+            # the target dataset does not carry.
+            target_category = pool_record["category"]
             if target_category not in category_id_by_name:
                 continue
             alpha_area = int(np.count_nonzero(rgba[..., 3]))

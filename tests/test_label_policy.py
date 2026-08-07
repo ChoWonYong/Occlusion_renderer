@@ -41,6 +41,45 @@ class DetectorBboxPolicyTest(unittest.TestCase):
                         detector_bbox_policy="nonsense")
 
 
+class NoLabelIsDeletedTest(unittest.TestCase):
+    """Whatever the baseline trains on must survive into the treatment set.
+
+    ByteTrack's MOTDataset drops annotations with ``iscrowd != 0`` or
+    ``area == 0``, and YOLOX has no ignore-region handling, so either would turn
+    an occluded object into an explicit negative rather than skipping it.
+    """
+
+    def test_fully_occluded_victim_survives(self) -> None:
+        mask = np.ones((10, 10), dtype=np.uint8)  # covers the victim entirely
+        label = label_frame(_base_annotation(), mask, (10, 10), [7],
+                            detector_bbox_policy="amodal_original")
+        self.assertEqual(label["occlusion_ratio"], 1.0)
+        self.assertEqual(label["iscrowd"], 0)
+        self.assertGreater(label["area"], 0)  # the loader keeps it
+        self.assertEqual(label["visible_area"], 0)
+        self.assertEqual(label["bbox"], label["amodal_bbox"])
+
+    def test_area_matches_the_detector_target(self) -> None:
+        # amodal policy: area describes the amodal box the detector must predict,
+        # the same definition data/kitti_tracking.py gives the baseline
+        label = label_frame(_base_annotation(), _left_half_mask(), (10, 10), [7],
+                            detector_bbox_policy="amodal_original")
+        self.assertEqual(label["area"], 100)
+        self.assertEqual(label["visible_area"], 50)
+        # visible policy: area describes the visible box it predicts instead
+        legacy = label_frame(_base_annotation(), _left_half_mask(), (10, 10), [7],
+                             detector_bbox_policy="visible")
+        self.assertEqual(legacy["area"], 50)
+
+    def test_untouched_object_is_unchanged(self) -> None:
+        empty = np.zeros((10, 10), dtype=np.uint8)
+        label = label_frame(_base_annotation(), empty, (10, 10), [],
+                            detector_bbox_policy="amodal_original")
+        self.assertEqual(label["occlusion_ratio"], 0.0)
+        self.assertEqual(label["iscrowd"], 0)
+        self.assertEqual(label["occluder_ids"], [])
+
+
 class ValidateExtendedAnnotationTest(unittest.TestCase):
     def _extended(self, policy: str) -> dict:
         visible = [5.0, 0.0, 5.0, 10.0]
