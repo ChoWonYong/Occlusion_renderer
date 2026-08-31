@@ -1,0 +1,33 @@
+base: default.yaml
+
+phase: phase4_detection_evaluation_random_jitter
+
+# Phase 4 intentionally evaluates the already-trained Phase-2 arm. It used the
+# automatic confidence-filtered pool and the established random/mid jitter; the
+# optional Phase-3 real jitter is not part of either checkpoint below.
+tracklet_synthesis:
+  paste_jitter:
+    mode: random
+    preset: mid
+
+phase4_evaluation:
+  output_dir: ../artifacts/phase4/detection_metrics_random_mid
+  protocol: coco_bbox
+  iou_thresholds: [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+  max_detections: 100
+  occlusion_groups:
+    non_occluded: [0]
+    occluded: [1, 2]
+    unknown_excluded_from_subsets: [3]
+  runs:
+    baseline:
+      label: Original KITTI train only
+      checkpoint: ../artifacts/phase1/yolox_runs/phase1_baseline_full_seed0/latest_ckpt.pth.tar
+      training_data: baseline
+      real_jitter: false
+    confidence_filtered:
+      label: Automatic + confidence-filtered paste (random mid jitter)
+      checkpoint: ../artifacts/phase2/yolox_runs_conf60/phase1_treatment_append_conf60_full_seed0/latest_ckpt.pth.tar
+      training_data: baseline_plus_automatic_paste
+      real_jitter: false
+

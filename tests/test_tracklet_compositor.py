@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from label.compute import label_synthetic_occluder
+from synth.paste_jitter import FrameJitter
 from synth.tracklet_compositor import TrackletLayer, composite_tracklet_layers
 from synth.tracklet_pipeline import map_source_bbox
 
@@ -47,6 +48,30 @@ class TrackletCompositorTest(unittest.TestCase):
             height_fraction_range=(0.1, 0.4),
         )
         self.assertEqual(mapped, (602.0, 126.0, 160.0, 90.0))
+
+    def test_real_effect_is_applied_after_target_resize(self) -> None:
+        background = np.zeros((20, 20, 3), dtype=np.uint8)
+        jitter = FrameJitter(
+            real_scenario="snow",
+            effect_seed=4,
+            snow_fraction=0.3,
+            snow_block_size=1,
+        )
+        output, rendered = composite_tracklet_layers(
+            background,
+            [
+                TrackletLayer(
+                    1,
+                    self._patch(100, (30, 30, 30)),
+                    (5, 5, 10, 10),
+                    post_resize_jitter=jitter,
+                )
+            ],
+        )
+        # White samples survive at the final 10x10 paste resolution while the
+        # alpha-derived area remains exactly the requested target box.
+        self.assertTrue(np.all(output == 255, axis=2).any())
+        self.assertEqual(int(rendered[0].amodal_mask.sum()), 100)
 
 
 if __name__ == "__main__":

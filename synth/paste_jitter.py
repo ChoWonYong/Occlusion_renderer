@@ -23,6 +23,18 @@ patches the renderer pastes.
 than the plain ``w|cos| + h|sin|``: PIL rounds the rotated corner bounds outward
 with ceil/floor, and the target box has to grow by exactly what the patch grew by
 or the rotated crop would be squashed back into an unrotated aspect ratio.
+
+Two policies are available:
+
+``random`` (the default)
+    The original independent ``low``/``mid``/``high`` draws.
+``real``
+    One physically named condition is held for the whole event: day, night,
+    tunnel, rain, or snow. Day/night are exposure changes, tunnel adds warm
+    centre-weighted lighting, rain locally displaces a sparse set of 2x2 RGB
+    blocks, and snow adds the same weak precipitation distortion plus sparse
+    white RGB pixels. These effects never alter alpha, so the placement search
+    and rendered occlusion ratio remain identical.
 """
 
 from __future__ import annotations
@@ -47,6 +59,30 @@ class JitterRanges:
     flip_prob: float
     scale: tuple[float, float]
     rotation: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class RealScenario:
+    """Parameters for one event-level real-world appearance condition."""
+
+    name: str
+    weight: float
+    brightness: tuple[float, float]
+    temporal_variation: float = 0.02
+    warmth: float = 0.0
+    vignette: float = 0.0
+    elastic_fraction: float = 0.0
+    elastic_block_size: int = 2
+    elastic_displacement: int = 1
+    snow_fraction: float = 0.0
+    snow_block_size: int = 1
+
+
+@dataclass(frozen=True)
+class RealJitterPolicy:
+    """Validated collection of real scenarios sampled once per event."""
+
+    scenarios: tuple[RealScenario, ...]
 
 
 PRESETS: dict[str, JitterRanges] = {
@@ -97,6 +133,15 @@ class FrameJitter:
     flip: bool = False
     scale: float = 1.0
     rotation: float = 0.0
+    real_scenario: str = "none"
+    effect_seed: int = 0
+    warmth: float = 0.0
+    vignette: float = 0.0
+    elastic_fraction: float = 0.0
+    elastic_block_size: int = 2
+    elastic_displacement: int = 1
+    snow_fraction: float = 0.0
+    snow_block_size: int = 1
 
     @property
     def changes_geometry(self) -> bool:
@@ -111,6 +156,15 @@ class FrameJitter:
             "flip": self.flip,
             "scale": self.scale,
             "rotation": self.rotation,
+            "real_scenario": self.real_scenario,
+            "effect_seed": self.effect_seed,
+            "warmth": self.warmth,
+            "vignette": self.vignette,
+            "elastic_fraction": self.elastic_fraction,
+            "elastic_block_size": self.elastic_block_size,
+            "elastic_displacement": self.elastic_displacement,
+            "snow_fraction": self.snow_fraction,
+            "snow_block_size": self.snow_block_size,
         }
 
 
@@ -152,6 +206,77 @@ def ranges_from_config(section: Mapping[str, Any] | None) -> JitterRanges | None
     return replace(ranges, **overrides)
 
 
+def _pair(value: Any, *, field: str) -> tuple[float, float]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) != 2:
+        raise ValueError(f"{field} must contain exactly two numbers")
+    pair = (float(value[0]), float(value[1]))
+    if pair[0] > pair[1]:
+        raise ValueError(f"{field} lower bound must not exceed upper bound")
+    return pair
+
+
+def real_policy_from_config(section: Mapping[str, Any] | None) -> RealJitterPolicy:
+    """Parse ``paste_jitter.real`` and validate every configured scenario."""
+    if not section:
+        raise ValueError("real jitter mode requires a non-empty 'real' section")
+    names = section.get("scenarios", ["day", "night", "tunnel", "rain", "snow"])
+    if not isinstance(names, Sequence) or isinstance(names, (str, bytes)) or not names:
+        raise ValueError("real.scenarios must be a non-empty sequence")
+    weights = section.get("weights", {})
+    definitions = section.get("definitions", section)
+    scenarios: list[RealScenario] = []
+    for raw_name in names:
+        name = str(raw_name).lower()
+        raw = definitions.get(name)
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"real jitter scenario {name!r} has no definition")
+        brightness = _pair(raw.get("brightness", [1.0, 1.0]), field=f"real.{name}.brightness")
+        weight = float(weights.get(name, raw.get("weight", 1.0)))
+        if weight < 0:
+            raise ValueError(f"real jitter weight for {name!r} must be non-negative")
+        scenario = RealScenario(
+            name=name,
+            weight=weight,
+            brightness=brightness,
+            temporal_variation=float(raw.get("temporal_variation", 0.02)),
+            warmth=float(raw.get("warmth", 0.0)),
+            vignette=float(raw.get("vignette", 0.0)),
+            elastic_fraction=float(raw.get("elastic_fraction", 0.0)),
+            elastic_block_size=int(raw.get("elastic_block_size", 2)),
+            elastic_displacement=int(raw.get("elastic_displacement", 1)),
+            snow_fraction=float(raw.get("snow_fraction", 0.0)),
+            snow_block_size=int(raw.get("snow_block_size", 1)),
+        )
+        for field in ("temporal_variation", "vignette", "elastic_fraction", "snow_fraction"):
+            value = float(getattr(scenario, field))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"real.{name}.{field} must be in [0, 1]")
+        if scenario.elastic_block_size < 1 or scenario.snow_block_size < 1:
+            raise ValueError(f"real.{name} block sizes must be positive")
+        if scenario.elastic_displacement < 0:
+            raise ValueError(f"real.{name}.elastic_displacement must be non-negative")
+        scenarios.append(scenario)
+    if not any(item.weight > 0 for item in scenarios):
+        raise ValueError("at least one real jitter scenario must have positive weight")
+    return RealJitterPolicy(tuple(scenarios))
+
+
+def jitter_policy_from_config(
+    section: Mapping[str, Any] | None,
+) -> JitterRanges | RealJitterPolicy | None:
+    """Resolve the configured random (default), real, or disabled policy."""
+    if not section:
+        return None
+    mode = str(section.get("mode", "random")).lower()
+    if mode == "random":
+        return ranges_from_config(section)
+    if mode == "real":
+        return real_policy_from_config(section.get("real"))
+    if mode in {"off", "none", "false"}:
+        return None
+    raise ValueError("paste_jitter.mode must be one of: random, real, off")
+
+
 def sample_frame(ranges: JitterRanges, rng: random.Random) -> FrameJitter:
     return FrameJitter(
         color=rng.uniform(*ranges.color),
@@ -165,12 +290,58 @@ def sample_frame(ranges: JitterRanges, rng: random.Random) -> FrameJitter:
 
 
 def sample_sequence(
-    ranges: JitterRanges | None, length: int, rng: random.Random
+    ranges: JitterRanges | RealJitterPolicy | None,
+    length: int,
+    rng: random.Random,
+    *,
+    scenario: str | None = None,
 ) -> list[FrameJitter]:
-    """One independent draw per frame; all-identity when jitter is off."""
+    """Draw one event sequence; real mode holds one scenario for every frame."""
     if ranges is None:
         return [IDENTITY] * int(length)
+    if isinstance(ranges, RealJitterPolicy):
+        return sample_real_sequence(ranges, length, rng, scenario=scenario)
     return [sample_frame(ranges, rng) for _ in range(int(length))]
+
+
+def sample_real_sequence(
+    policy: RealJitterPolicy,
+    length: int,
+    rng: random.Random,
+    *,
+    scenario: str | None = None,
+) -> list[FrameJitter]:
+    """Sample an event-level condition with small frame-to-frame exposure drift."""
+    if scenario is None:
+        selected = rng.choices(
+            policy.scenarios,
+            weights=[item.weight for item in policy.scenarios],
+            k=1,
+        )[0]
+    else:
+        matches = [item for item in policy.scenarios if item.name == str(scenario).lower()]
+        if not matches:
+            raise ValueError(f"real jitter scenario {scenario!r} is not configured")
+        selected = matches[0]
+    base_brightness = rng.uniform(*selected.brightness)
+    output: list[FrameJitter] = []
+    for _ in range(int(length)):
+        drift = rng.uniform(-selected.temporal_variation, selected.temporal_variation)
+        output.append(
+            FrameJitter(
+                brightness=max(0.0, base_brightness * (1.0 + drift)),
+                real_scenario=selected.name,
+                effect_seed=rng.randrange(0, 2**32),
+                warmth=selected.warmth,
+                vignette=selected.vignette,
+                elastic_fraction=selected.elastic_fraction,
+                elastic_block_size=selected.elastic_block_size,
+                elastic_displacement=selected.elastic_displacement,
+                snow_fraction=selected.snow_fraction,
+                snow_block_size=selected.snow_block_size,
+            )
+        )
+    return output
 
 
 def expand_ratios(width: float, height: float, rotation: float) -> tuple[float, float]:
@@ -241,6 +412,110 @@ def _geometric(image: Any, jitter: FrameJitter, resample: Any) -> Any:
     return image
 
 
+def _eligible_origins(alpha: np.ndarray, block_size: int) -> np.ndarray:
+    """Return top-left block coordinates whose block intersects the object."""
+    height, width = alpha.shape
+    if height < block_size or width < block_size:
+        return np.empty((0, 2), dtype=np.int64)
+    ys, xs = np.nonzero(alpha[: height - block_size + 1, : width - block_size + 1] > 0)
+    return np.column_stack([ys, xs])
+
+
+def _sparse_elastic(
+    rgb: np.ndarray,
+    alpha: np.ndarray,
+    *,
+    fraction: float,
+    block_size: int,
+    displacement: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Locally displace sparse RGB blocks without changing the alpha mask."""
+    if fraction <= 0 or displacement <= 0:
+        return rgb
+    origins = _eligible_origins(alpha, block_size)
+    if not len(origins):
+        return rgb
+    opaque = max(1, int(np.count_nonzero(alpha)))
+    count = max(1, round(opaque * fraction / (block_size * block_size)))
+    chosen = origins[rng.integers(0, len(origins), size=count)]
+    source = rgb.copy()
+    output = rgb.copy()
+    height, width = alpha.shape
+    for y, x in chosen:
+        dy = int(rng.integers(-displacement, displacement + 1))
+        dx = int(rng.integers(-displacement, displacement + 1))
+        if dx == 0 and dy == 0:
+            dx = 1
+        source_y = min(max(0, int(y) + dy), height - block_size)
+        source_x = min(max(0, int(x) + dx), width - block_size)
+        output[y : y + block_size, x : x + block_size] = source[
+            source_y : source_y + block_size,
+            source_x : source_x + block_size,
+        ]
+    return output
+
+
+def _sparse_snow(
+    rgb: np.ndarray,
+    alpha: np.ndarray,
+    *,
+    fraction: float,
+    block_size: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Turn a sparse set of object pixels white; alpha and geometry stay fixed."""
+    if fraction <= 0:
+        return rgb
+    origins = _eligible_origins(alpha, block_size)
+    if not len(origins):
+        return rgb
+    opaque = max(1, int(np.count_nonzero(alpha)))
+    count = max(1, round(opaque * fraction / (block_size * block_size)))
+    chosen = origins[rng.integers(0, len(origins), size=count)]
+    output = rgb.copy()
+    for y, x in chosen:
+        mask = alpha[y : y + block_size, x : x + block_size] > 0
+        block = output[y : y + block_size, x : x + block_size]
+        block[mask] = 255
+    return output
+
+
+def apply_real_effect_rgb(
+    rgb: np.ndarray, alpha: np.ndarray, jitter: FrameJitter
+) -> np.ndarray:
+    """Apply deterministic RGB-only tunnel/precipitation effects."""
+    if jitter.real_scenario == "none":
+        return rgb
+    output = np.asarray(rgb, dtype=np.float32).copy()
+    if jitter.warmth != 0.0:
+        # Positive warmth raises red and gently suppresses blue.
+        output[..., 0] *= 1.0 + jitter.warmth
+        output[..., 2] *= max(0.0, 1.0 - jitter.warmth)
+    if jitter.vignette > 0.0:
+        height, width = alpha.shape
+        yy, xx = np.ogrid[-1.0:1.0:complex(height), -1.0:1.0:complex(width)]
+        radius = np.clip((xx * xx + yy * yy) / 2.0, 0.0, 1.0)
+        output *= (1.0 - jitter.vignette * radius)[..., None]
+    output_u8 = np.clip(output, 0, 255).astype(np.uint8)
+    generator = np.random.default_rng(jitter.effect_seed)
+    output_u8 = _sparse_elastic(
+        output_u8,
+        alpha,
+        fraction=jitter.elastic_fraction,
+        block_size=jitter.elastic_block_size,
+        displacement=jitter.elastic_displacement,
+        rng=generator,
+    )
+    return _sparse_snow(
+        output_u8,
+        alpha,
+        fraction=jitter.snow_fraction,
+        block_size=jitter.snow_block_size,
+        rng=generator,
+    )
+
+
 def jitter_alpha(alpha: np.ndarray, jitter: FrameJitter) -> np.ndarray:
     """Geometric half only — what the rho integral image is built from.
 
@@ -257,7 +532,9 @@ def jitter_alpha(alpha: np.ndarray, jitter: FrameJitter) -> np.ndarray:
     return np.asarray(image).copy()
 
 
-def jitter_rgba(rgba: np.ndarray, jitter: FrameJitter) -> np.ndarray:
+def jitter_rgba(
+    rgba: np.ndarray, jitter: FrameJitter, *, apply_real_effects: bool = True
+) -> np.ndarray:
     """Full jitter for the pasted patch. Scale is not applied here — it rides on
     the target box (see :func:`jitter_box`), which is what the crop is resized to."""
     patch = np.asarray(rgba, dtype=np.uint8)
@@ -268,6 +545,8 @@ def jitter_rgba(rgba: np.ndarray, jitter: FrameJitter) -> np.ndarray:
     from PIL import Image
 
     rgb = _photometric(Image.fromarray(patch[..., :3]), jitter)
+    if apply_real_effects:
+        rgb = Image.fromarray(apply_real_effect_rgb(np.asarray(rgb), patch[..., 3], jitter))
     rgb = _geometric(rgb, jitter, Image.Resampling.BILINEAR)
     alpha = _geometric(
         Image.fromarray(patch[..., 3]), jitter, Image.Resampling.NEAREST

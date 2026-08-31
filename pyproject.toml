@@ -35,6 +35,14 @@ kds-build-ab = "data.build_phase1:main"
 kds-train-yolox = "train.run:main"
 kds-eval-boxmot = "eval.run_boxmot:main"
 kds-aggregate = "eval.aggregate:main"
+kds-codetr-detect = "mining.codetr:main"
+kds-build-detector-tracklets = "pool.build_detector_tracklet_pool:main"
+kds-compare-tracklet-pools = "eval.compare_tracklet_pools:main"
+kds-filter-detector-tracklets = "pool.filter_detector_tracklet_pool:main"
+kds-audit-confidence-filter = "eval.audit_confidence_filter:main"
+kds-visualize-confidence-filter = "scripts.visualize_confidence_filter:main"
+kds-visualize-real-jitter = "scripts.visualize_real_jitter:main"
+kds-eval-detection-metrics = "eval.run_detection_metrics:main"
 
 [tool.setuptools.packages.find]
 include = ["common*", "data*", "pool*", "segment*", "depth*", "synth*", "label*", "qc*", "mining*", "train*", "eval*", "scripts*"]

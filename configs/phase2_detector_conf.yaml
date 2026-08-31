@@ -1,0 +1,58 @@
+base: phase1_detector.yaml
+
+phase: phase2_detector_confidence_filter
+
+codetr_detector:
+  class_assignment:
+    policy: highest_confidence_detector_label
+    confidence_threshold_for_class: null
+    confidence_role: quality_filter_only
+    aspect_fallback: missing_detector_label_only
+
+detector_tracklet_pool:
+  quality_filter:
+    enabled: true
+    # Co-DETR scores below 0.60 are removed frame by frame. A tracklet survives
+    # only when at least 30 consecutive frames remain; identity is never a gate.
+    detector_confidence_min: 0.60
+    min_frames: 30
+    input_pool_dir: ../artifacts/phase1/codetr_sam3_tracklets
+    output_dir: ../artifacts/phase2/codetr_sam3_tracklets_conf60
+    primary_goal: clear_unoccluded_frames
+    identity_purity_is_diagnostic_only: true
+
+confidence_filter_audit:
+  output_dir: ../artifacts/phase2/confidence_filter_audit
+  thresholds: [0.40, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]
+
+confidence_filter_visualization:
+  output_dir: ../artifacts/phase2/confidence_filter_videos
+  background_sequence: "0000"
+  fps: 10
+  crf: 18
+  panel_size: [640, 360]
+  # One controlled comparison for each outcome, plus class/source coverage.
+  scenarios:
+    - {name: accepted_high_car_kitti, outcome: accepted_high, category: car, source_dataset: KITTI}
+    - {name: accepted_high_person_mot17, outcome: accepted_high, category: person, source_dataset: MOT17}
+    - {name: accepted_trimmed_car, outcome: accepted_trimmed, category: car}
+    - {name: accepted_trimmed_person, outcome: accepted_trimmed, category: person}
+    - {name: rejected_fragmented, outcome: rejected_fragmented}
+    - {name: rejected_low, outcome: rejected_low}
+
+tracklet_synthesis:
+  output_dir: ../artifacts/phase2/tracklet_synthetic_conf60
+  pool_sources:
+    - ../artifacts/phase2/codetr_sam3_tracklets_conf60
+
+dataset:
+  output_dir: ../artifacts/phase2/yolox_data_conf60
+  synthetic_output_dir: ../artifacts/phase2/tracklet_synthetic_conf60
+  paste_mode: append
+
+train:
+  output_dir: ../artifacts/phase2/yolox_runs_conf60
+  devices: 4
+
+tracker:
+  output_dir: ../artifacts/phase2/tracking_conf60

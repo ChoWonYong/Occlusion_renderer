@@ -1,0 +1,13 @@
+# Default end-to-end protocol: automatic Co-DETR/ByteTrack/SAM3 extraction,
+# per-frame detector-confidence filtering, and the measured random mid jitter.
+base: phase2_detector_conf.yaml
+
+phase: default_automatic_confidence_filtered
+
+tracklet_synthesis:
+  pool_sources:
+    - ../artifacts/phase2/codetr_sam3_tracklets_conf60
+  paste_jitter:
+    mode: random
+    preset: mid
+

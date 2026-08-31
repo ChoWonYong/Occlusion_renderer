@@ -321,7 +321,7 @@ def run(config_file: str | Path, paste_mode: str | None = None) -> dict[str, Any
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build Phase-1 YOLOX baseline/treatment datasets")
-    parser.add_argument("--config", default="configs/phase1_kitti.yaml", type=Path)
+    parser.add_argument("--config", default="configs/default.yaml", type=Path)
     parser.add_argument(
         "--paste-mode",
         choices=["append", "replace"],

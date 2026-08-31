@@ -1,0 +1,37 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from common.io import save_json
+from synth.event_pipeline import _load_pool
+
+
+class EventPoolSourcesTest(unittest.TestCase):
+    def test_explicit_pool_source_excludes_legacy_pools(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            detector = root / "detector"
+            legacy = root / "legacy"
+            record = {
+                "id": 1,
+                "category": "car",
+                "source": "Co-DETR:KITTI",
+                "sequence": "0000",
+                "source_track_id": 7,
+                "length": 1,
+                "frames": [{"file_name": "00.png"}],
+            }
+            save_json(detector / "tracklets.json", {"tracklets": [record]})
+            save_json(legacy / "tracklets.json", {"tracklets": [{**record, "id": 2}]})
+            config = {
+                "tracklet_synthesis": {"pool_sources": [str(detector)]},
+                "tracklet_pool": {"output_dir": str(legacy)},
+            }
+            pool = _load_pool(config, root)
+            self.assertEqual(len(pool), 1)
+            self.assertEqual(pool[0].source, "Co-DETR:KITTI")
+            self.assertEqual(pool[0].frames[0]["rgba_path"], str(detector / "00.png"))
+
+
+if __name__ == "__main__":
+    unittest.main()

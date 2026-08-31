@@ -185,7 +185,7 @@ def to_markdown(results: list[dict[str, Any]], class_names: list[str]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Aggregate per-class TrackEval outputs into a comparison table")
-    parser.add_argument("--config", default="configs/phase1_kitti.yaml", type=Path)
+    parser.add_argument("--config", default="configs/default.yaml", type=Path)
     parser.add_argument("--runs", nargs="+", required=True, help="TrackEval run_name directories under tracker.output_dir")
     parser.add_argument("--out", type=Path, default=None, help="write markdown table here")
     args = parser.parse_args()

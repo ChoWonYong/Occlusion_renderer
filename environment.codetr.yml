@@ -1,0 +1,15 @@
+prefix: /home/wcho/Occlusion_renderer/.conda-envs/kds-codetr
+channels:
+  - defaults
+dependencies:
+  - python=3.8
+  - pip>=23,<25
+  - setuptools<70
+  - wheel
+  - pip:
+      - numpy>=1.21,<1.24
+      - Pillow>=9,<11
+      - PyYAML>=6,<7
+      - scipy>=1.7,<1.11
+      - tqdm>=4.60,<5
+      - yapf==0.40.1

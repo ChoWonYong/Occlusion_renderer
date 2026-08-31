@@ -9,6 +9,7 @@ import sys
 from typing import Any
 
 from common.config import config_path, load_config, resolve_path
+from common.gpu_budget import enforce_account_gpu_budget
 
 
 # The four photometric steps ByteTrack's _distort bundles, in the order it applies
@@ -104,6 +105,12 @@ def build_command(
     if resume:
         command.append("--resume")
     env = os.environ.copy()
+    # ByteTrack's multi-GPU launcher spawns workers via the bare command
+    # ``python3``. Directly invoking this environment's interpreter does not
+    # activate Conda or prepend its bin directory to PATH, so without this the
+    # workers can silently fall back to /usr/bin/python3 and miss YOLOX deps.
+    python_bin = str(Path(sys.executable).parent)
+    env["PATH"] = python_bin + os.pathsep + env.get("PATH", "")
     env.update(
         {
             "KDS_NUM_CLASSES": str(len(config["classes"]["names"])),
@@ -149,6 +156,16 @@ def run(
         print("# resume=on: continuing from the run's own latest_ckpt (epoch read from it)")
     if dry_run:
         return 0
+    config, _ = load_config(config_file)
+    budget = enforce_account_gpu_budget(
+        config.get("resources", {}), project_limit_key="phase1_train_max_gpus"
+    )
+    devices = int(config["train"]["devices"])
+    if budget["requested"] != devices:
+        raise RuntimeError(
+            f"training config requests {devices} GPUs, but CUDA_VISIBLE_DEVICES "
+            f"exposes {budget['requested']}"
+        )
     checkpoint = Path(command[command.index("-c") + 1])
     if not checkpoint.is_file():
         raise FileNotFoundError(
@@ -161,7 +178,7 @@ def run(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fine-tune COCO-pretrained YOLOX-X on KITTI")
-    parser.add_argument("--config", default="configs/phase1_kitti.yaml", type=Path)
+    parser.add_argument("--config", default="configs/default.yaml", type=Path)
     parser.add_argument(
         "--condition", choices=["kitti", "baseline", "treatment"], default="kitti"
     )

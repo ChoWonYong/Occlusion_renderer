@@ -11,6 +11,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from common.config import config_path, load_config, resolve_path
+from common.gpu_budget import enforce_account_gpu_budget
 from common.io import load_json, save_json
 from common.io_video import group_annotations_by_image, group_frames_by_video
 from mining.tracker import create_boxmot_bytetrack
@@ -260,37 +261,39 @@ def _write_trackeval_layout(
     return layouts
 
 
-def run(
-    config_file: str | Path,
-    condition: str,
-    seed: int,
-    checkpoint_override: str | Path | None = None,
-    skip_metrics: bool = False,
-    model_source: str = "finetuned",
-    aug: str = "full",
-    epoch: str = "ep60",
-    paste_mode: str | None = None,
-    tag: str | None = None,
+def _balanced_video_shards(
+    frames_by_video: dict[int, list[dict[str, Any]]], num_shards: int
+) -> list[list[int]]:
+    """Assign whole videos to similarly sized shards without splitting tracks."""
+    if num_shards < 1:
+        raise ValueError("num_shards must be positive")
+    shards: list[list[int]] = [[] for _ in range(num_shards)]
+    loads = [0] * num_shards
+    ordered = sorted(
+        frames_by_video,
+        key=lambda video_id: (-len(frames_by_video[video_id]), video_id),
+    )
+    for video_id in ordered:
+        shard_index = min(range(num_shards), key=lambda index: (loads[index], index))
+        shards[shard_index].append(video_id)
+        loads[shard_index] += len(frames_by_video[video_id])
+    for shard in shards:
+        shard.sort()
+    return shards
+
+
+def _infer_prediction_shard(
+    config: dict[str, Any],
+    path: Path,
+    checkpoint: Path,
+    model_source: str,
+    *,
+    shard_index: int,
+    num_shards: int,
 ) -> dict[str, Any]:
-    if condition not in {"kitti", "baseline", "treatment"}:
-        raise ValueError("condition must be kitti, baseline, or treatment")
-    if model_source not in {"coco-pretrained", "finetuned"}:
-        raise ValueError("model_source must be coco-pretrained or finetuned")
-    if epoch not in EPOCH_CKPT:
-        raise ValueError(f"epoch must be one of {sorted(EPOCH_CKPT)}")
-    config, path = load_config(config_file)
-    if condition == "treatment" and paste_mode is None:
-        # Resolve the same way train.run does, so omitting the flag cannot point
-        # the evaluation at a different run than the one that was trained.
-        paste_mode = str(config["dataset"].get("paste_mode", "replace"))
-    if checkpoint_override:
-        checkpoint = Path(checkpoint_override).resolve()
-    elif model_source == "coco-pretrained":
-        checkpoint = config_path(config, path, "paths", "coco_pretrained_yolox_x")
-    else:
-        checkpoint = _checkpoint_path(config, path, condition, seed, aug, epoch, paste_mode, tag)
-    if not checkpoint.is_file():
-        raise FileNotFoundError(f"fine-tuned checkpoint not found: {checkpoint}")
+    """Run detector+ByteTrack on a disjoint set of complete KITTI videos."""
+    if not 0 <= shard_index < num_shards:
+        raise ValueError("shard_index must be in [0, num_shards)")
     device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
     model, exp, class_id_map, use_half = _load_model(
         config, path, checkpoint, device, model_source
@@ -305,18 +308,15 @@ def run(
     class_index = {name: index for index, name in enumerate(class_names)}
     gt_rows: dict[str, dict[str, list[str]]] = {name: defaultdict(list) for name in class_names}
     pred_rows: dict[str, dict[str, list[str]]] = {name: defaultdict(list) for name in class_names}
-    run_name = (
-        "phase1_coco_pretrained"
-        if model_source == "coco-pretrained"
-        else f"{_experiment_dir_name(condition, aug, seed, paste_mode, tag)}_{epoch}"
-    )
 
     try:
         import cv2
     except ImportError as exc:
         raise RuntimeError("opencv-python is required") from exc
     kitti_root = config_path(config, path, "paths", "kitti_tracking")
-    for video_id, frames in sorted(frames_by_video.items()):
+    assigned_ids = _balanced_video_shards(frames_by_video, num_shards)[shard_index]
+    for video_id in assigned_ids:
+        frames = frames_by_video[video_id]
         tracker = create_boxmot_bytetrack(config["tracker"], class_names)
         sequence = str(video_by_id[video_id]["name"])
         ignore_by_frame = _ignore_regions_by_frame(kitti_root, sequence, class_names)
@@ -353,13 +353,197 @@ def run(
                     f"{frame_number},{IGNORE_ID_BASE + offset},{x:.2f},{y:.2f},"
                     f"{width:.2f},{height:.2f},1,{TRACKEVAL_DISTRACTOR_CLASS},1\n"
                 )
+    return {
+        "shard_index": shard_index,
+        "num_shards": num_shards,
+        "videos": [video_by_id[video_id] for video_id in assigned_ids],
+        "gt_rows": {name: dict(rows) for name, rows in gt_rows.items()},
+        "pred_rows": {name: dict(rows) for name, rows in pred_rows.items()},
+    }
 
+
+def _merge_prediction_shards(
+    payloads: list[dict[str, Any]], class_names: list[str]
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, list[str]]], dict[str, dict[str, list[str]]]]:
+    videos: list[dict[str, Any]] = []
+    gt_rows: dict[str, dict[str, list[str]]] = {name: defaultdict(list) for name in class_names}
+    pred_rows: dict[str, dict[str, list[str]]] = {name: defaultdict(list) for name in class_names}
+    expected_count = len(payloads)
+    for expected_index, payload in enumerate(sorted(payloads, key=lambda item: int(item["shard_index"]))):
+        if int(payload["shard_index"]) != expected_index:
+            raise ValueError("prediction shard indices must be contiguous from zero")
+        if int(payload["num_shards"]) != expected_count:
+            raise ValueError("prediction shard count mismatch")
+        videos.extend(payload["videos"])
+        for name in class_names:
+            for sequence, rows in payload["gt_rows"].get(name, {}).items():
+                gt_rows[name][sequence].extend(rows)
+            for sequence, rows in payload["pred_rows"].get(name, {}).items():
+                pred_rows[name][sequence].extend(rows)
+    videos.sort(key=lambda video: int(video["id"]))
+    if len({int(video["id"]) for video in videos}) != len(videos):
+        raise ValueError("a video was evaluated by more than one prediction shard")
+    return videos, gt_rows, pred_rows
+
+
+def _parallel_prediction_shards(
+    config_file: Path,
+    config: dict[str, Any],
+    output_root: Path,
+    *,
+    workers: int,
+    condition: str,
+    seed: int,
+    model_source: str,
+    aug: str,
+    epoch: str,
+    paste_mode: str | None,
+    tag: str | None,
+    checkpoint_override: str | Path | None,
+) -> list[dict[str, Any]]:
+    visible = [
+        item.strip()
+        for item in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
+        if item.strip() and item.strip() != "-1"
+    ]
+    if len(visible) != workers or len(set(visible)) != workers:
+        raise RuntimeError(
+            f"--workers {workers} requires exactly {workers} distinct GPUs in "
+            "CUDA_VISIBLE_DEVICES"
+        )
+    enforce_account_gpu_budget(
+        config.get("resources", {}), project_limit_key="phase1_eval_max_gpus"
+    )
+    shard_dir = output_root / "_prediction_shards"
+    processes: list[subprocess.Popen[Any]] = []
+    outputs: list[Path] = []
+    project_root = Path(__file__).resolve().parents[1]
+    for shard_index, device in enumerate(visible):
+        output = shard_dir / f"shard_{shard_index:02d}.json"
+        outputs.append(output)
+        command = [
+            sys.executable, "-m", "eval.run_boxmot",
+            "--config", str(config_file),
+            "--condition", condition,
+            "--model-source", model_source,
+            "--aug", aug,
+            "--epoch", epoch,
+            "--seed", str(seed),
+            "--worker-shard-index", str(shard_index),
+            "--worker-shard-count", str(workers),
+            "--worker-output", str(output),
+        ]
+        if paste_mode is not None:
+            command.extend(["--paste-mode", paste_mode])
+        if tag is not None:
+            command.extend(["--tag", tag])
+        if checkpoint_override is not None:
+            command.extend(["--checkpoint", str(checkpoint_override)])
+        environment = os.environ.copy()
+        environment["CUDA_VISIBLE_DEVICES"] = device
+        processes.append(
+            subprocess.Popen(command, cwd=project_root, env=environment)
+        )
+    return_codes = [process.wait() for process in processes]
+    failed = [index for index, code in enumerate(return_codes) if code != 0]
+    if failed:
+        raise RuntimeError(f"evaluation prediction shard workers failed: {failed}")
+    return [load_json(output) for output in outputs]
+
+
+def run(
+    config_file: str | Path,
+    condition: str,
+    seed: int,
+    checkpoint_override: str | Path | None = None,
+    skip_metrics: bool = False,
+    model_source: str = "finetuned",
+    aug: str = "full",
+    epoch: str = "ep60",
+    paste_mode: str | None = None,
+    tag: str | None = None,
+    workers: int = 1,
+    worker_shard_index: int | None = None,
+    worker_shard_count: int | None = None,
+    worker_output: str | Path | None = None,
+) -> dict[str, Any]:
+    if condition not in {"kitti", "baseline", "treatment"}:
+        raise ValueError("condition must be kitti, baseline, or treatment")
+    if model_source not in {"coco-pretrained", "finetuned"}:
+        raise ValueError("model_source must be coco-pretrained or finetuned")
+    if epoch not in EPOCH_CKPT:
+        raise ValueError(f"epoch must be one of {sorted(EPOCH_CKPT)}")
+    config, path = load_config(config_file)
+    if condition == "treatment" and paste_mode is None:
+        # Resolve the same way train.run does, so omitting the flag cannot point
+        # the evaluation at a different run than the one that was trained.
+        paste_mode = str(config["dataset"].get("paste_mode", "replace"))
+    if checkpoint_override:
+        checkpoint = Path(checkpoint_override).resolve()
+    elif model_source == "coco-pretrained":
+        checkpoint = config_path(config, path, "paths", "coco_pretrained_yolox_x")
+    else:
+        checkpoint = _checkpoint_path(config, path, condition, seed, aug, epoch, paste_mode, tag)
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"fine-tuned checkpoint not found: {checkpoint}")
+    run_name = (
+        "phase1_coco_pretrained"
+        if model_source == "coco-pretrained"
+        else f"{_experiment_dir_name(condition, aug, seed, paste_mode, tag)}_{epoch}"
+    )
     output_root = resolve_path(path.parent, config["tracker"]["output_dir"]) / run_name
+    class_names = list(config["classes"]["names"])
+    if worker_shard_index is not None:
+        if worker_shard_count is None or worker_output is None:
+            raise ValueError("prediction workers require shard count and output path")
+        payload = _infer_prediction_shard(
+            config,
+            path,
+            checkpoint,
+            model_source,
+            shard_index=worker_shard_index,
+            num_shards=worker_shard_count,
+        )
+        save_json(worker_output, payload)
+        return {
+            "worker_shard_index": worker_shard_index,
+            "worker_shard_count": worker_shard_count,
+            "output": str(worker_output),
+        }
+    if workers < 1:
+        raise ValueError("workers must be positive")
+    if workers == 1:
+        payloads = [
+            _infer_prediction_shard(
+                config,
+                path,
+                checkpoint,
+                model_source,
+                shard_index=0,
+                num_shards=1,
+            )
+        ]
+    else:
+        payloads = _parallel_prediction_shards(
+            path,
+            config,
+            output_root,
+            workers=workers,
+            condition=condition,
+            seed=seed,
+            model_source=model_source,
+            aug=aug,
+            epoch=epoch,
+            paste_mode=paste_mode,
+            tag=tag,
+            checkpoint_override=checkpoint,
+        )
+    videos, gt_rows, pred_rows = _merge_prediction_shards(payloads, class_names)
     layouts = _write_trackeval_layout(
         output_root,
         run_name,
         class_names,
-        list(video_by_id.values()),
+        videos,
         gt_rows,
         pred_rows,
     )
@@ -394,8 +578,12 @@ def run(
             "Identity",
         ]
         metric_commands.append(command)
-        if not skip_metrics:
-            subprocess.run(command, check=True)
+    if not skip_metrics:
+        metric_processes = [subprocess.Popen(command) for command in metric_commands]
+        metric_codes = [process.wait() for process in metric_processes]
+        failed_metrics = [index for index, code in enumerate(metric_codes) if code != 0]
+        if failed_metrics:
+            raise RuntimeError(f"TrackEval metric workers failed: {failed_metrics}")
     summary = {
         "condition": condition,
         "model_source": model_source,
@@ -404,6 +592,7 @@ def run(
         "epoch": epoch,
         "paste_mode": paste_mode,
         "tag": tag,
+        "prediction_workers": workers,
         "checkpoint": str(checkpoint),
         "tracker": "BoxMOT ByteTrack (ReID disabled)",
         # Which protocol produced these numbers: results from before ignore
@@ -419,7 +608,7 @@ def run(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate YOLOX-X with BoxMOT ByteTrack")
-    parser.add_argument("--config", default="configs/phase1_kitti.yaml", type=Path)
+    parser.add_argument("--config", default="configs/default.yaml", type=Path)
     parser.add_argument(
         "--condition", choices=["kitti", "baseline", "treatment"], default="kitti"
     )
@@ -445,6 +634,10 @@ def main() -> None:
     )
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--skip-metrics", action="store_true")
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--worker-shard-index", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--worker-shard-count", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--worker-output", type=Path, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
     print(
         run(
@@ -458,6 +651,10 @@ def main() -> None:
             args.epoch,
             args.paste_mode,
             args.tag,
+            args.workers,
+            args.worker_shard_index,
+            args.worker_shard_count,
+            args.worker_output,
         )
     )
 

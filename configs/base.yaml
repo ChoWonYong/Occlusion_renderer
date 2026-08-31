@@ -15,6 +15,11 @@ paths:
   sam3_repo: ../third_party/sam3
   sam3_checkpoint: ../weights/sam3/sam3.pt
   sam3_bpe: ../third_party/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  # Published Co-DETR ViT-L uses legacy MMDetection/MMCV, so it is isolated.
+  codetr_python: ../.conda-envs/kds-codetr/bin/python
+  codetr_repo: ../third_party/Co-DETR
+  codetr_config: ../third_party/Co-DETR/projects/configs/co_dino_vit/co_dino_5scale_vit_large_coco.py
+  codetr_checkpoint: ../weights/codetr/pytorch_model.pth
   bytetrack_repo: "${KDS_BYTETRACK_REPO:-~/ByteTrack}"
   boxmot_repo: "${KDS_BOXMOT_REPO:-~/boxmot}"
   trackeval_repo: "${KDS_TRACKEVAL_REPO:-~/BankTweak/TrackEval}"
@@ -40,3 +45,13 @@ classes:
 occluder_class_dist:
   car: 0.65
   person: 0.35
+
+# Account-wide ceiling, including unrelated jobs owned by this user. Co-DETR
+# detection remains single-GPU; independent SAM3 candidate shards may use up to
+# four GPUs when the account has that much capacity left.
+resources:
+  account_gpu_limit: 6
+  phase1_detector_max_gpus: 1
+  phase1_sam_max_gpus: 4
+  phase1_train_max_gpus: 4
+  phase1_eval_max_gpus: 4

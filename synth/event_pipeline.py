@@ -41,8 +41,9 @@ from synth.geometry import AlphaIntegralCache, sample_event_placement
 from synth.paste_jitter import (
     FrameJitter,
     JitterRanges,
+    RealJitterPolicy,
+    jitter_policy_from_config,
     jitter_rgba,
-    ranges_from_config,
     sample_sequence,
 )
 from synth.placement import mask_cover_ratio, mid_height_factor, sample_height_factor
@@ -101,17 +102,24 @@ def _save_rgb(path: Path, image: np.ndarray) -> None:
 def _load_pool(config: Mapping[str, Any], config_dir: Path) -> list[PoolTracklet]:
     """Load and merge the MOT17 + KITTI tracklet pools, resolving RGBA paths."""
     metadatas: list[dict[str, Any]] = []
-    candidates = [
-        ("tracklet_pool", "output_dir"),
-        ("kitti_sam3_pool", "tracklet_output_dir"),
-    ]
-    for section, key in candidates:
-        directory = config.get(section, {}).get(key)
-        if not directory:
-            continue
-        base_dir = resolve_path(config_dir, directory)
+    configured_sources = config.get("tracklet_synthesis", {}).get("pool_sources")
+    if configured_sources:
+        source_dirs = [resolve_path(config_dir, directory) for directory in configured_sources]
+    else:
+        candidates = [
+            ("tracklet_pool", "output_dir"),
+            ("kitti_sam3_pool", "tracklet_output_dir"),
+        ]
+        source_dirs = [
+            resolve_path(config_dir, directory)
+            for section, key in candidates
+            if (directory := config.get(section, {}).get(key))
+        ]
+    for base_dir in source_dirs:
         pool_file = base_dir / "tracklets.json"
         if not pool_file.is_file():
+            if configured_sources:
+                raise FileNotFoundError(f"configured tracklet pool not found: {pool_file}")
             continue
         metadata = load_json(pool_file)
         for record in metadata.get("tracklets", []):
@@ -226,7 +234,7 @@ def _resolve_placement(
     usage: dict[tuple[Any, ...], int],
     used_in_sequence: set[tuple[Any, ...]],
     scene_check: Any = None,
-    jitter_ranges: JitterRanges | None = None,
+    jitter_ranges: JitterRanges | RealJitterPolicy | None = None,
 ) -> tuple[PoolTracklet, dict[str, Any]] | None:
     """Sample a placement, retrying with alternative same-class tracklets.
 
@@ -327,7 +335,9 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
 
     detector_bbox_policy = str(synthesis.get("victim_detector_bbox_policy", "amodal_original"))
     blend_method = str(synthesis.get("blend_method", "none"))
-    jitter_ranges = ranges_from_config(synthesis.get("paste_jitter"))
+    jitter_section = synthesis.get("paste_jitter") or {}
+    jitter_ranges = jitter_policy_from_config(jitter_section)
+    jitter_mode = str(jitter_section.get("mode", "random")) if jitter_section else "off"
     max_per_victim = int(synthesis.get("max_occluders_per_victim", 2))
     rng = random.Random(int(config.get("seed", 0)))
     integral_cache = AlphaIntegralCache()
@@ -343,7 +353,15 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
             "scale_policy": "class_height_range_sampled",
             "rho_method": "occluder_mask_integral_image",
             "rho_control": "lateral_offset",
-            "paste_jitter": str((synthesis.get("paste_jitter") or {}).get("preset", "off")),
+            "paste_jitter": {
+                "mode": jitter_mode,
+                "preset": str(jitter_section.get("preset", "off")),
+                "real_scenarios": (
+                    [item.name for item in jitter_ranges.scenarios]
+                    if isinstance(jitter_ranges, RealJitterPolicy)
+                    else []
+                ),
+            },
             "ignore_rule": "none: every victim the baseline trains on stays a positive",
             "amodal_mask_caveat": "KITTI victim amodal masks use bounding-box proxies.",
         },
@@ -471,7 +489,11 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
                 active.append(
                     TrackletLayer(
                         track_id=sched.synthetic_track_id,
-                        rgba=jitter_rgba(_load_rgba(frame_record["rgba_path"]), jitter),
+                        rgba=jitter_rgba(
+                            _load_rgba(frame_record["rgba_path"]),
+                            jitter,
+                            apply_real_effects=False,
+                        ),
                         bbox_xywh=box,
                         provenance={
                             "tracklet_id": int(sched.occluder.tracklet_id),
@@ -486,6 +508,7 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
                             "translation_xy": list(sched.translation),
                             "paste_jitter": jitter.to_dict(),
                         },
+                        post_resize_jitter=jitter,
                     )
                 )
             background, rendered = composite_tracklet_layers(background, active, blend_method=blend_method)
@@ -587,6 +610,8 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
                     "height_factor": sched.height_factor,
                     "lateral_offset_fraction": sched.lateral_offset_fraction,
                     "translation_xy": list(sched.translation),
+                    "jitter_mode": jitter_mode,
+                    "real_jitter_scenario": sched.jitters[0].real_scenario,
                 }
             )
         summary = dict(plan["summary"])
@@ -620,6 +645,13 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
         "synthetic_tracklets": len(occluder_tracks),
         "events": len(events),
         "detector_bbox_policy": detector_bbox_policy,
+        "jitter_mode": jitter_mode,
+        "real_jitter_scenarios": {
+            name: sum(
+                1 for track in occluder_tracks if track["real_jitter_scenario"] == name
+            )
+            for name in sorted({track["real_jitter_scenario"] for track in occluder_tracks})
+        },
         "qc_ok": bool(qc_result.get("ok", False)),
         "output_dir": str(output_dir),
     }
@@ -632,7 +664,7 @@ def run(config_file: str | Path, max_sequences_override: int | None = None) -> d
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Event-based multi-class tracklet synthesis on KITTI")
-    parser.add_argument("--config", default="configs/phase1_kitti.yaml", type=Path)
+    parser.add_argument("--config", default="configs/default.yaml", type=Path)
     parser.add_argument("--max-sequences", type=int, default=None)
     args = parser.parse_args()
     print(run(args.config, args.max_sequences))

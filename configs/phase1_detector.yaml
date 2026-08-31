@@ -1,0 +1,68 @@
+base: phase1_kitti.yaml
+
+phase: phase1_detector_gt_free
+
+codetr_detector:
+  output_dir: ../artifacts/phase1/codetr_detections
+  model_id: zongzhuofan/co-detr-vit-large-coco
+  device: cuda:0
+  # Keep every box ByteTrack can consume, including its low-score second-pass
+  # association range [min_conf=0.10, track_thresh=0.45). Scores below 0.10 are
+  # discarded by the tracker and only bloat the environment-neutral bridge.
+  # Aggregate tracklet quality filtering remains deferred to Phase 2.
+  score_threshold: 0.10
+  max_detections_per_frame: 300
+  coco_class_map:
+    person: person
+    car: car
+    bus: car
+    truck: car
+  # Final class policy: use Co-DETR's highest-confidence label at every score.
+  # Aspect is an emergency fallback only when an adapter supplies no label;
+  # confidence thresholds are quality gates and never class-switching gates.
+  aspect_ratio_fallback: true
+
+detector_tracklet_pool:
+  candidate_output_dir: ../artifacts/phase1/codetr_bytetrack_candidates
+  output_dir: ../artifacts/phase1/codetr_sam3_tracklets
+  mot17_detector_view: FRCNN
+  target_fps: 10
+  min_frames: 30
+  max_frames: 100
+  max_per_identity: 2
+  max_tracklets: 200
+  min_bbox_area: 400
+  min_mask_area: 128
+  sam3_context_padding: 0.2
+  sam3_confidence_threshold: 0.5
+  sam3_min_detector_iou: 0.3
+  device: cuda
+  sam3_precision: auto
+  # Phase 1 records these signals but does not filter on them yet, so the raw
+  # detector-induced quality drop can be measured. Phase 2 will gate per frame,
+  # then keep the longest passing run; identity purity is not a gate.
+  quality_filter:
+    enabled: false
+    primary_goal: clear_unoccluded_frames
+    identity_purity_is_diagnostic_only: true
+
+tracklet_synthesis:
+  output_dir: ../artifacts/phase1/tracklet_synthetic_detector
+  # Prevent accidental mixing with the old GT-derived MOT17/KITTI pools.
+  pool_sources:
+    - ../artifacts/phase1/codetr_sam3_tracklets
+
+dataset:
+  output_dir: ../artifacts/phase1/yolox_data_detector
+  synthetic_output_dir: ../artifacts/phase1/tracklet_synthetic_detector
+  # Accepted final protocol: pasted frames add data; image counts need not match.
+  paste_mode: append
+
+train:
+  output_dir: ../artifacts/phase1/yolox_runs_detector
+  # Four free GPUs are used with the same global batch size (4), so the
+  # optimization budget and LR stay comparable to the one-GPU reference.
+  devices: 4
+
+tracker:
+  output_dir: ../artifacts/phase1/tracking_detector

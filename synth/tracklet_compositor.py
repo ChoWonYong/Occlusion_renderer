@@ -12,6 +12,10 @@ class TrackletLayer:
     rgba: np.ndarray
     bbox_xywh: tuple[float, float, float, float]
     provenance: dict[str, Any] = field(default_factory=dict)
+    # Real precipitation blocks are defined in final pasted-image pixels. Apply
+    # them after resizing so a requested 2x2 block does not disappear when a
+    # large source crop is downscaled.
+    post_resize_jitter: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,10 @@ def _rasterize(layer: TrackletLayer, image_shape: tuple[int, int]) -> _Rasterize
     alpha = np.asarray(
         Image.fromarray(patch[..., 3]).resize((target_width, target_height), Image.Resampling.NEAREST)
     ).copy()
+    if layer.post_resize_jitter is not None:
+        from synth.paste_jitter import apply_real_effect_rgb
+
+        rgb = apply_real_effect_rgb(rgb, alpha, layer.post_resize_jitter)
 
     source_x1, source_y1 = max(0, -target_x), max(0, -target_y)
     source_x2 = min(target_width, image_width - target_x)
