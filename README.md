@@ -3,20 +3,19 @@
 KITTI Tracking 학습 프레임에 **시간적으로 연속된 car/person occluder를 합성**해
 detector와 tracker의 가림(occlusion) 강건성을 높이는 파이프라인입니다.
 
-핵심은 **occluder를 GT 없이 만든다**는 점입니다. 붙일 객체를 고르고, 잘라내고,
-클래스를 정하고, 품질을 거르는 전 과정에서 KITTI/MOT17의 GT bbox·visibility·class를
-전혀 사용하지 않습니다. GT는 train/eval split 고정, YOLOX 학습 label, 최종 평가에만
-쓰입니다.
+핵심은 **occlusion augmentation GT 없이 만든다**는 점입니다. 붙일 객체를 고르고, 잘라내고,
+클래스를 정하고, 품질을 거르는 전 과정에서 KITTI/MOT17의 bbox·visibility·class와 같은 GT 정보를
+전혀 사용하지 않습니다. 기존의 train/test set에다가 임의의 non labeled dataset을 활용할 수 있습니다.
 
 ```text
-KITTI train(split A) + MOT17 FRCNN frames
+KITTI train(split A) + MOT17 frames
   -> Co-DETR ViT-L detection (score >= 0.10)
-  -> ByteTrack association (ReID 없음) -> tracklet 후보
+  -> ByteTrack association (by motion information) -> tracklet 후보
   -> detector bbox를 20% 확장한 crop으로 SAM3 분할 -> detector bbox로 재-crop
   -> detector confidence >= 0.60인 최장 연속 구간만 채택 (30프레임 미만이면 폐기)
   -> 사건 단위 copy-paste 합성 (random/mid jitter)
   -> 원본 KITTI + pasted frame으로 YOLOX-X 학습
-  -> COCO bbox metric / BoxMOT ByteTrack + TrackEval 평가
+  -> COCO bbox metric / BoxMOT ByteTrack (호환성) + TrackEval 평가
 ```
 
 설계상의 두 가지 선택:
@@ -30,12 +29,12 @@ KITTI train(split A) + MOT17 FRCNN frames
 
 ## 1. 결과
 
-### 1-1. Detector / Tracker 성능
+### 1-1. Detector / Tracker(detector equipped) 성능 향상
 
 - split: train `0000 0001 0002 0003 0004 0005 0006 0007 0010 0014 0015 0016`,
   eval `0008 0009 0011 0012 0013 0017 0018 0019 0020`
 - baseline = 원본 KITTI train 3,644장, treatment = baseline + pasted 2,194장 = 5,838장
-- 두 arm 모두 COCO-pretrained YOLOX-X를 60 epoch fine-tuning, **seed 0**, EMA checkpoint
+- 두 arm 모두 COCO-pretrained YOLOX-X를 60 epoch fine-tuning, **seed 0**, EMA checkpoint ([ByteTrack](https://github.com/FoundationVision/ByteTrack) fine tuning 관례)
 - eval 4,364장 동일, 지표는 tracking과 동일한 **car/person 2-class** 기준
 
 **Detector (COCO bbox AP, IoU 0.50:0.95, %)**
@@ -46,7 +45,7 @@ KITTI train(split A) + MOT17 FRCNN frames
 | Occlusion AP | 30.28 | 32.34 | **+2.07** |
 | Non-occlusion AP | 56.14 | 56.65 | **+0.51** |
 
-**Tracker (BoxMOT ByteTrack, ReID off, TrackEval, %)**
+**Tracker (BoxMOT ByteTrack, TrackEval, %)**
 
 | | baseline | treatment | 차이 (pp) |
 |---|---:|---:|---:|
@@ -62,13 +61,9 @@ KITTI train(split A) + MOT17 FRCNN frames
 
 지표 정의:
 
-- **Occlusion AP** — KITTI `occluded`가 1(partly) 또는 2(largely)인 GT만 남겨 같은 COCO
+- **Occlusion AP** — KITTI GT 정보 중 `occluded`가 1(partly) 또는 2(largely)인 GT만 남겨 같은 COCO
   evaluator를 다시 돌린 값. **Non-occlusion AP**는 `occluded == 0`만 남긴 값.
   `occluded == 3`(unknown)은 전체 AP에는 포함하되 두 subset에서는 제외합니다.
-- KITTI `DontCare`와 앉은 사람은 detection·tracking 평가 모두에서 ignore 영역으로
-  처리합니다. 두 arm에 동일하게 적용되지만, **KITTI 공식 leaderboard 수치와는 직접
-  비교할 수 없습니다.** 근거와 이탈 항목은 [KITTI 클래스 규약](docs/KITTI_CLASS_PROTOCOL.md)에
-  정리했습니다.
 
 ### 1-2. Tracklet 품질: SAM3 crop 정책
 
@@ -79,7 +74,7 @@ KITTI train(split A) + MOT17 FRCNN frames
   `0000 0001 0003 0004 0005 0009 0011 0012 0015 0017 0019 0020`
 - 각 행은 그 설정에서 뽑힌 200개 tracklet에 **동일한 confidence >= 0.60 필터**를 적용한 뒤,
   MOTS GT와 매칭된 프레임만 픽셀 단위로 채점한 macro 평균입니다.
-- MOTS GT는 선택·필터링에 전혀 쓰이지 않습니다(사후 평가 전용).
+- Tracklet 생성 단계에서 MOTS GT는 선택·필터링에 전혀 쓰이지 않습니다(평가 전용).
 
 | crop 정책 | 채택 tracklet | 채택 프레임 | MOTS 매칭 | Precision (%) | Recall (%) | IoU (%) |
 |---|---:|---:|---:|---:|---:|---:|
@@ -88,9 +83,9 @@ KITTI train(split A) + MOT17 FRCNN frames
 | 20% padding | 162 | 8,486 | 5,784 | 97.38 | 88.74 | 86.94 |
 | **20% padding → detector bbox 재-crop** | **162** | **8,486** | **5,784** | **97.54** | 86.66 | 85.02 |
 
-**채택 정책은 마지막 행입니다.** padding으로 맥락을 주면 SAM3가 객체를 더 온전히 찾아내지만
-(recall/IoU 상승), 최종 크기는 detector의 bbox를 믿는 편이 mask precision이 가장 높습니다.
-즉 **분할은 context-aware하게, 크기는 detector bbox 기준으로** 갑니다.
+채택 정책은 마지막 행입니다. padding으로 맥락을 주면 SAM3가 객체를 더 온전히 찾아내지만
+(recall/IoU 상승), 최종 크기는 detector의 bbox를 믿는 편이 **mask precision**이 가장 높습니다.
+즉 **분할은 context-aware하게, 크기는 detector에 더 신뢰를 주는 방향** 으로 채택하였습다. 
 이 정책으로 만든 pool이 §1-1의 학습에 그대로 쓰였습니다.
 
 ---
