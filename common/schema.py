@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -127,40 +127,6 @@ def validate_extended_annotation(annotation: Mapping[str, Any]) -> None:
             raise ValueError("COCO bbox must equal amodal_bbox under amodal_original policy")
     elif annotation.get("bbox") != annotation.get("visible_bbox"):
         raise ValueError("COCO bbox must equal visible_bbox")
-
-
-@dataclass(frozen=True)
-class Motion:
-    model: str
-    p0: tuple[float, float]
-    v0: tuple[float, float]
-    acceleration: tuple[float, float] = (0.0, 0.0)
-    scale0: float = 1.0
-    scale_rate: float = 0.0
-
-    def position(self, time: float) -> tuple[float, float]:
-        return (
-            self.p0[0] + self.v0[0] * time + 0.5 * self.acceleration[0] * time * time,
-            self.p0[1] + self.v0[1] * time + 0.5 * self.acceleration[1] * time * time,
-        )
-
-    def scale(self, time: float) -> float:
-        return max(0.01, self.scale0 + self.scale_rate * time)
-
-
-@dataclass(frozen=True)
-class OccluderTrack:
-    track_id: int
-    video_id: int
-    category: str
-    source: dict[str, Any]
-    motion: Motion
-    frames: list[dict[str, Any]] = field(default_factory=list)
-    depth_plane: float | None = None
-    synthetic: bool = True
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(frozen=True)

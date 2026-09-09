@@ -49,8 +49,6 @@ def run(config_file: str | Path) -> dict[str, Any]:
         ("ByteTrack repo", config_path(config, path, "paths", "bytetrack_repo"), True),
         ("BoxMOT repo", config_path(config, path, "paths", "boxmot_repo"), True),
         ("TrackEval repo", config_path(config, path, "paths", "trackeval_repo"), True),
-        ("COCO val2017 images (legacy crop path)", config_path(config, path, "paths", "coco_images"), False),
-        ("COCO annotations (legacy crop path)", config_path(config, path, "paths", "coco_annotations"), False),
         ("KITTI Tracking images", config_path(config, path, "paths", "kitti_tracking") / "training" / "image_02", True),
         ("KITTI Tracking labels", config_path(config, path, "paths", "kitti_tracking") / "training" / "label_02", True),
         ("MOT17 train", config_path(config, path, "paths", "mot17") / "train", True),
@@ -59,6 +57,12 @@ def run(config_file: str | Path) -> dict[str, Any]:
         ("SAM3 BPE vocabulary", config_path(config, path, "paths", "sam3_bpe"), True),
         ("COCO YOLOX-X checkpoint", config_path(config, path, "paths", "coco_pretrained_yolox_x"), True),
     ]
+    # Only the crop-policy ablation config declares MOTS ground truth.
+    ablation = config.get("sam3_context_ablation")
+    if ablation:
+        path_checks.append(
+            ("KITTI MOTS ground truth", resolve_path(path.parent, ablation["mots_root"]), True)
+        )
     for name, checked_path, required in path_checks:
         add(name, checked_path.exists(), str(checked_path), required)
     result = {
@@ -73,8 +77,8 @@ def run(config_file: str | Path) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Check Phase-1 environment, repos, data, and checkpoints")
-    parser.add_argument("--config", default="configs/phase1_kitti.yaml", type=Path)
+    parser = argparse.ArgumentParser(description="Check the environment, repos, data, and checkpoints")
+    parser.add_argument("--config", default="configs/default.yaml", type=Path)
     args = parser.parse_args()
     result = run(args.config)
     for check in result["checks"]:

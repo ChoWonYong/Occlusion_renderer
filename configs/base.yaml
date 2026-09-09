@@ -7,8 +7,6 @@ seed: 0
 paths:
   project_root: ..
   artifacts: ../artifacts
-  coco_images: ../datasets/coco/val2017
-  coco_annotations: ../datasets/coco/annotations/instances_val2017.json
   kitti_tracking: ../datasets/KITTI
   mot17: "${KDS_MOT17:-~/tmp_SwapPatch/data/MOT17}"
   sam3_python: ../.conda-envs/kds-sam3/bin/python

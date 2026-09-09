@@ -1,0 +1,7 @@
+base: sam3_context_ablation.yaml
+
+# True no-context baseline: the clipped Co-DETR/ByteTrack box is passed to
+# SAM3 as-is. No object-level box expansion is applied before or after SAM3.
+sam3_context_ablation:
+  output_dir: ../artifacts/official_split/sam3_context_ablation_00pct
+  context_padding: 0.00

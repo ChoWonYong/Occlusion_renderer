@@ -17,3 +17,4 @@ third_party/
 .pip-cache/
 *.part
 *.egg-info/
+explain.md

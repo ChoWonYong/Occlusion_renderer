@@ -1,0 +1,44 @@
+base: default.yaml
+
+phase: official_kitti_sequence_split
+
+# The KITTI MOTS paper split. Only used to produce the inputs of the crop-policy
+# comparison (Co-DETR detections, ByteTrack candidates, and the production
+# confidence-filtered pool); no detector is trained on it.
+# Every automatic KITTI crop is restricted to this train list.
+split:
+  train_sequences: ["0000", "0001", "0003", "0004", "0005", "0009", "0011", "0012", "0015", "0017", "0019", "0020"]
+  eval_sequences: ["0002", "0006", "0007", "0008", "0010", "0013", "0014", "0016", "0018"]
+  output: ../artifacts/official_split/split.json
+
+codetr_detector:
+  output_dir: ../artifacts/official_split/codetr_detections
+
+detector_tracklet_pool:
+  candidate_output_dir: ../artifacts/official_split/codetr_bytetrack_candidates
+  output_dir: ../artifacts/official_split/codetr_sam3_tracklets
+  quality_filter:
+    input_pool_dir: ../artifacts/official_split/codetr_sam3_tracklets
+    output_dir: ../artifacts/official_split/codetr_sam3_tracklets_conf60
+
+# Split-local output dirs so a command accidentally pointed at this config can
+# never overwrite the Split-A artifacts behind the detector/tracker result.
+tracklet_synthesis:
+  output_dir: ../artifacts/official_split/tracklet_synthetic_conf60
+  pool_sources:
+    - ../artifacts/official_split/codetr_sam3_tracklets_conf60
+  paste_jitter:
+    mode: random
+    preset: mid
+
+dataset:
+  output_dir: ../artifacts/official_split/yolox_data_conf60
+  synthetic_output_dir: ../artifacts/official_split/tracklet_synthetic_conf60
+  paste_mode: append
+
+train:
+  output_dir: ../artifacts/official_split/yolox_runs_conf60
+  devices: 4
+
+tracker:
+  output_dir: ../artifacts/official_split/tracking_conf60

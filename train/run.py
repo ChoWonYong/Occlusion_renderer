@@ -6,7 +6,6 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
-from typing import Any
 
 from common.config import config_path, load_config, resolve_path
 from common.gpu_budget import enforce_account_gpu_budget
@@ -37,10 +36,9 @@ def _experiment_name(
 ) -> str:
     """``tag`` separates arms that differ only in the dataset they were built
     from — same condition, aug and paste mode, different config."""
-    label = "kitti_finetuned" if condition == "kitti" else condition
     suffix = f"_{paste_mode}" if condition == "treatment" and paste_mode else ""
     tag_part = f"_{tag}" if tag else ""
-    return f"phase1_{label}{suffix}{tag_part}_{aug}_seed{seed}"
+    return f"phase1_{condition}{suffix}{tag_part}_{aug}_seed{seed}"
 
 
 def build_command(
@@ -53,8 +51,8 @@ def build_command(
     resume: bool = False,
     tag: str | None = None,
 ) -> tuple[list[str], dict[str, str]]:
-    if condition not in {"kitti", "baseline", "treatment"}:
-        raise ValueError("condition must be kitti, baseline, or treatment")
+    if condition not in {"baseline", "treatment"}:
+        raise ValueError("condition must be baseline or treatment")
     if aug not in AUG_LEVELS:
         raise ValueError(f"aug must be one of {sorted(AUG_LEVELS)}")
     config, path = load_config(config_file)
@@ -62,9 +60,7 @@ def build_command(
     checkpoint = config_path(config, path, "paths", "coco_pretrained_yolox_x")
     dataset_root = resolve_path(path.parent, config["dataset"]["output_dir"])
     exp_file = resolve_path(path.parent, config["train"]["exp_file"])
-    if condition == "kitti":
-        train_key = "finetune_train_json"
-    elif condition == "treatment":
+    if condition == "treatment":
         # The two paste modes produce different training sets; picking the wrong
         # file would silently compare the wrong pair.
         mode = paste_mode or str(config["dataset"].get("paste_mode", "replace"))
@@ -179,9 +175,7 @@ def run(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fine-tune COCO-pretrained YOLOX-X on KITTI")
     parser.add_argument("--config", default="configs/default.yaml", type=Path)
-    parser.add_argument(
-        "--condition", choices=["kitti", "baseline", "treatment"], default="kitti"
-    )
+    parser.add_argument("--condition", choices=["baseline", "treatment"], required=True)
     parser.add_argument("--aug", choices=sorted(AUG_LEVELS), default="full")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-epoch", type=int, default=None, help="override epoch count (smoke)")

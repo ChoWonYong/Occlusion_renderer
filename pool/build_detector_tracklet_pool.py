@@ -16,7 +16,7 @@ from common.config import config_path, load_config, resolve_path
 from common.gpu_budget import enforce_account_gpu_budget
 from common.io import load_json, save_json
 from mining.detected_tracklets import mine_detection_tracklets
-from pool.build_tracklet_pool import crop_with_context, select_matching_instance
+from pool.crops import crop_with_context, select_matching_instance
 from segment.base import SegBackend
 
 

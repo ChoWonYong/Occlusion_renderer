@@ -88,12 +88,10 @@ kitti_map:
 
 | 파일 | 역할 |
 |---|---|
-| `data/kitti_tracking.py:120` | 매핑에 없는 타입을 **폐기** (`DontCare`, `Misc`, `Person`) |
-| `data/kitti_tracking.py:81-83` | `dict.fromkeys(kitti_map.values())` 순서로 **category id 부여** |
-| `data/build_phase1.py:249-251` | A/B 학습셋·eval셋 변환 |
-| `synth/event_pipeline.py:320` | 합성 시 victim 클래스 판정 |
-| `pool/build_kitti_sam3_pool.py:58,77,99` | occluder pool 클래스 결정·필터 |
-| `data/build_kitti_finetune.py:18` | KITTI fine-tune split |
+| `data/kitti_tracking.py` (`convert_tracking_to_video_coco`) | 매핑에 없는 타입을 **폐기** (`DontCare`, `Misc`, `Person`) |
+| `data/kitti_tracking.py` (`categories` 구성) | `dict.fromkeys(kitti_map.values())` 순서로 **category id 부여** |
+| `data/build_phase1.py` (`run`) | A/B 학습셋·eval셋 변환 |
+| `synth/event_pipeline.py` (`run`) | 합성 시 victim 클래스 판정 |
 
 > **주의할 결합:** category id가 `kitti_map`에 **적힌 순서**로 정해지고, ByteTrack
 > `MOTDataset`이 `cls = class_ids.index(category_id)`로 head 인덱스를 만듭니다. 평가 쪽은
@@ -130,7 +128,7 @@ clean 연속 run이 truck 0개, bicycle 1개뿐이라 pool에서 제외했습니
 ### 왜 필요했나
 
 `DontCare`와 `Person`은 `kitti_map`에 없어 변환 단계에서 폐기됐습니다
-(`data/kitti_tracking.py:120`). 그러면 GT에 존재하지 않으므로 **FN이 되는 게 아니라**, 그 자리를
+(`data/kitti_tracking.py`). 그러면 GT에 존재하지 않으므로 **FN이 되는 게 아니라**, 그 자리를
 detector가 정확히 잡으면 매칭할 GT가 없어 **FP로 계산**됩니다. 잘 맞힐수록 손해입니다.
 
 실측(`pastejit_mid` seed0, eval 9시퀀스): GT와 매칭되지 않은 검출 중
@@ -220,9 +218,9 @@ TP가 car 12·person 17개 줄었습니다(FN 동수 증가). 실제 객체와 D
 
 나머지 74개 COCO 클래스는 버립니다.
 
-> 과거 `configs/base.yaml`에 `classes.coco_map`(이름→이름)이 있었으나 레거시
-> `synth/video_pipeline.py` 한 곳에서만 쓰이는 **죽은 설정**이었고, COCO 참조 평가와는 무관했습니다.
-> 2026-08-01에 제거했습니다. COCO 매핑을 바꿔야 한다면 `COCO_TO_PROJECT_CLASS` 한 곳만 고치면 됩니다.
+> 과거 `configs/base.yaml`에 `classes.coco_map`(이름→이름)이 있었으나 지금은 제거된 레거시
+> 합성 경로 한 곳에서만 쓰이는 **죽은 설정**이었고, COCO 참조 평가와는 무관했습니다.
+> COCO 매핑을 바꿔야 한다면 `COCO_TO_PROJECT_CLASS` 한 곳만 고치면 됩니다.
 
 ---
 

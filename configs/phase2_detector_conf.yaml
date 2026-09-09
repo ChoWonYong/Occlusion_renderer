@@ -21,25 +21,6 @@ detector_tracklet_pool:
     primary_goal: clear_unoccluded_frames
     identity_purity_is_diagnostic_only: true
 
-confidence_filter_audit:
-  output_dir: ../artifacts/phase2/confidence_filter_audit
-  thresholds: [0.40, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]
-
-confidence_filter_visualization:
-  output_dir: ../artifacts/phase2/confidence_filter_videos
-  background_sequence: "0000"
-  fps: 10
-  crf: 18
-  panel_size: [640, 360]
-  # One controlled comparison for each outcome, plus class/source coverage.
-  scenarios:
-    - {name: accepted_high_car_kitti, outcome: accepted_high, category: car, source_dataset: KITTI}
-    - {name: accepted_high_person_mot17, outcome: accepted_high, category: person, source_dataset: MOT17}
-    - {name: accepted_trimmed_car, outcome: accepted_trimmed, category: car}
-    - {name: accepted_trimmed_person, outcome: accepted_trimmed, category: person}
-    - {name: rejected_fragmented, outcome: rejected_fragmented}
-    - {name: rejected_low, outcome: rejected_low}
-
 tracklet_synthesis:
   output_dir: ../artifacts/phase2/tracklet_synthetic_conf60
   pool_sources:

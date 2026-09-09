@@ -1,0 +1,18 @@
+base: official_split.yaml
+
+phase: sam3_context_crop_ablation
+
+# Paired A/B audit from one SAM3 result per frame. This never overwrites the
+# production pool used by the completed official-split training runs.
+sam3_context_ablation:
+  output_dir: ../artifacts/official_split/sam3_context_ablation_20pct
+  mots_root: ../datasets/MOTS_KITTI
+  context_padding: 0.20
+  min_mask_area: 128
+  min_frames: 30
+  max_tracklets: 200
+  gt_bbox_iou_threshold: 0.50
+  complete_recall_threshold: 0.90
+
+resources:
+  phase1_sam_max_gpus: 4

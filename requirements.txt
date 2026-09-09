@@ -27,10 +27,8 @@ thop>=0.1.1
 ninja>=1.11
 h5py>=3.10,<4.0
 
-# Checkpoint download and H.264-capable comparison videos
+# Checkpoint download (huggingface-cli)
 huggingface-hub>=0.24,<2.0
-imageio>=2.34,<3.0
-imageio-ffmpeg>=0.5,<1.0
 
 # Separate environments:
 #   Co-DETR: environment.codetr.yml + docs/CODETR_WORKFLOW.md

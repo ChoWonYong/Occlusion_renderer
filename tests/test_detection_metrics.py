@@ -1,6 +1,11 @@
 import unittest
 
-from eval.run_detection_metrics import _group_selector, _merge_shards, evaluate_predictions
+from eval.run_detection_metrics import (
+    _group_selector,
+    _merge_shards,
+    _selected_run_specs,
+    evaluate_predictions,
+)
 
 
 class DetectionMetricTest(unittest.TestCase):
@@ -64,7 +69,15 @@ class DetectionMetricTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "more than one"):
             _merge_shards(payloads)
 
+    def test_enabled_runs_excludes_inherited_run_specs(self) -> None:
+        selected = _selected_run_specs(
+            {
+                "runs": {"old": {"label": "old"}, "a": {"label": "a"}},
+                "enabled_runs": ["a"],
+            }
+        )
+        self.assertEqual(selected, {"a": {"label": "a"}})
+
 
 if __name__ == "__main__":
     unittest.main()
-

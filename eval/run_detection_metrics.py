@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -23,6 +24,81 @@ from eval.run_boxmot import (
 
 
 GroupSelector = Callable[[Mapping[str, Any]], bool]
+
+
+def _selected_run_specs(settings: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    runs = settings["runs"]
+    enabled = settings.get("enabled_runs")
+    if enabled is None:
+        return {str(name): spec for name, spec in runs.items()}
+    names = [str(name) for name in enabled]
+    missing = [name for name in names if name not in runs]
+    if missing:
+        raise ValueError(f"enabled phase4 runs are undefined: {missing}")
+    return {name: runs[name] for name in names}
+
+
+def _format_metric(value: float) -> str:
+    return "nan" if not math.isfinite(float(value)) else f"{float(value):.2f}"
+
+
+def _write_comparison_report(output_dir: Path, summary: Mapping[str, Any]) -> None:
+    comparison = summary["comparison"]
+    reference_name = str(comparison["reference_run"])
+    target_name = str(comparison["target_run"])
+    reference = summary["runs"][reference_name]
+    target = summary["runs"][target_name]
+    deltas = comparison["delta_target_minus_reference"]
+    lines = [
+        "# Detector comparison on the held-out KITTI split",
+        "",
+        f"Reference: **{reference['label']}**",
+        f"Target: **{target['label']}**",
+        "",
+        "All values are percentages; delta is target minus reference.",
+        "",
+    ]
+    evaluation_classes = summary.get("protocol", {}).get("evaluation_classes")
+    if evaluation_classes:
+        lines.extend(
+            [
+                "Evaluation classes: **" + ", ".join(evaluation_classes) + "**",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Combined classes",
+            "",
+            "| Scope | Metric | Reference | Target | Delta |",
+            "|---|---|---:|---:|---:|",
+        ]
+    )
+    for group in ("all", "occluded", "non_occluded"):
+        for metric in ("AP", "AP50", "AP75", "AR100", "Recall50"):
+            lines.append(
+                f"| {group} | {metric} | "
+                f"{_format_metric(reference['metrics'][group]['combined'][metric])} | "
+                f"{_format_metric(target['metrics'][group]['combined'][metric])} | "
+                f"{float(deltas[group]['combined'][metric]):+.2f} |"
+            )
+    lines.extend(
+        [
+            "",
+            "## Per-class overall AP",
+            "",
+            "| Class | Reference AP | Target AP | Delta |",
+            "|---|---:|---:|---:|",
+        ]
+    )
+    for category in reference["metrics"]["all"]["per_class"]:
+        lines.append(
+            f"| {category} | "
+            f"{_format_metric(reference['metrics']['all']['per_class'][category]['AP'])} | "
+            f"{_format_metric(target['metrics']['all']['per_class'][category]['AP'])} | "
+            f"{float(deltas['all']['per_class'][category]['AP']):+.2f} |"
+        )
+    (output_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _annotation_occlusion(annotation: Mapping[str, Any]) -> int:
@@ -263,7 +339,7 @@ def _worker(config_file: Path, shard_index: int, num_shards: int) -> dict[str, A
     config, path = load_config(config_file)
     output_dir = resolve_path(path.parent, config["phase4_evaluation"]["output_dir"])
     outputs: dict[str, Any] = {}
-    for run_name, spec in config["phase4_evaluation"]["runs"].items():
+    for run_name, spec in _selected_run_specs(config["phase4_evaluation"]).items():
         checkpoint = resolve_path(path.parent, spec["checkpoint"])
         if not checkpoint.is_file():
             raise FileNotFoundError(checkpoint)
@@ -333,7 +409,7 @@ def run(config_file: str | Path, workers: int = 1) -> dict[str, Any]:
     dataset = load_json(dataset_root / config["dataset"]["eval_json"])
     ignore_regions = _add_protocol_ignore_regions(dataset, config, path)
     run_results: dict[str, Any] = {}
-    for run_name, spec in settings["runs"].items():
+    for run_name, spec in _selected_run_specs(settings).items():
         payloads = [
             load_json(
                 output_dir
@@ -359,34 +435,40 @@ def run(config_file: str | Path, workers: int = 1) -> dict[str, Any]:
             "label": str(spec["label"]),
             "checkpoint": str(resolve_path(path.parent, spec["checkpoint"])),
             "training_data": str(spec["training_data"]),
-            "real_jitter": bool(spec.get("real_jitter", False)),
             "frames": int(merged["frames"]),
             "detections": len(merged["predictions"]),
             "predictions": str(prediction_file),
             "metrics": groups,
         }
 
-    baseline = run_results["baseline"]["metrics"]
-    treatment = run_results["confidence_filtered"]["metrics"]
+    comparison = settings.get("comparison", {})
+    reference_name = str(comparison.get("reference_run", "baseline"))
+    target_name = str(comparison.get("target_run", "confidence_filtered"))
+    if reference_name not in run_results or target_name not in run_results:
+        raise ValueError(
+            f"comparison runs must be enabled: reference={reference_name}, target={target_name}"
+        )
+    reference = run_results[reference_name]["metrics"]
+    target = run_results[target_name]["metrics"]
     deltas = {}
-    for group in treatment:
+    for group in target:
         deltas[group] = {
             "combined": {
                 metric: float(
-                    treatment[group]["combined"][metric]
-                    - baseline[group]["combined"][metric]
+                    target[group]["combined"][metric]
+                    - reference[group]["combined"][metric]
                 )
-                for metric in treatment[group]["combined"]
+                for metric in target[group]["combined"]
             },
             "per_class": {
                 name: {
                     metric: float(
-                        treatment[group]["per_class"][name][metric]
-                        - baseline[group]["per_class"][name][metric]
+                        target[group]["per_class"][name][metric]
+                        - reference[group]["per_class"][name][metric]
                     )
-                    for metric in treatment[group]["per_class"][name]
+                    for metric in target[group]["per_class"][name]
                 }
-                for name in treatment[group]["per_class"]
+                for name in target[group]["per_class"]
             },
         }
     summary = {
@@ -400,8 +482,7 @@ def run(config_file: str | Path, workers: int = 1) -> dict[str, Any]:
             "non_occluded": "KITTI occluded == 0",
             "unknown": "KITTI occluded == 3; included in overall, excluded from subsets",
             "ignore_regions": "KITTI DontCare and sitting-person policy shared with tracking eval",
-            "real_jitter": False,
-            "paste_jitter": "random/mid",
+            "paste_jitter": str(settings.get("paste_jitter", "random/mid")),
         },
         "eval_dataset": str(dataset_root / config["dataset"]["eval_json"]),
         "images": len(dataset["images"]),
@@ -409,10 +490,17 @@ def run(config_file: str | Path, workers: int = 1) -> dict[str, Any]:
         "protocol_ignore_regions": ignore_regions,
         "workers": workers,
         "runs": run_results,
-        "delta_confidence_filtered_minus_baseline": deltas,
+        "comparison": {
+            "reference_run": reference_name,
+            "target_run": target_name,
+            "delta_target_minus_reference": deltas,
+        },
         "output_dir": str(output_dir),
     }
+    if reference_name == "baseline" and target_name == "confidence_filtered":
+        summary["delta_confidence_filtered_minus_baseline"] = deltas
     save_json(output_dir / "summary.json", summary)
+    _write_comparison_report(output_dir, summary)
     return summary
 
 

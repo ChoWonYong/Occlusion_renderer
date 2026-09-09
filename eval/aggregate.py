@@ -187,11 +187,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Aggregate per-class TrackEval outputs into a comparison table")
     parser.add_argument("--config", default="configs/default.yaml", type=Path)
     parser.add_argument("--runs", nargs="+", required=True, help="TrackEval run_name directories under tracker.output_dir")
+    parser.add_argument(
+        "--classes",
+        nargs="+",
+        choices=sorted(CLASS_BENCHMARK),
+        default=None,
+        help="optional class subset to combine (for example: car person)",
+    )
     parser.add_argument("--out", type=Path, default=None, help="write markdown table here")
     args = parser.parse_args()
     config, path = load_config(args.config)
     tracking_root = resolve_path(path.parent, config["tracker"]["output_dir"])
-    class_names = list(config["classes"]["names"])
+    configured_classes = list(config["classes"]["names"])
+    class_names = list(args.classes) if args.classes else configured_classes
+    unavailable = [name for name in class_names if name not in configured_classes]
+    if unavailable:
+        raise ValueError(f"classes not configured for this experiment: {unavailable}")
     results = [aggregate_run(tracking_root, run, class_names) for run in args.runs]
     table = to_markdown(results, class_names)
     print(table)

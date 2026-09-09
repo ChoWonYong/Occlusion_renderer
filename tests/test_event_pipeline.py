@@ -73,9 +73,9 @@ class EventPipelineIntegrationTest(unittest.TestCase):
                 "paths": {"kitti_tracking": str(kitti)},
                 "classes": {"kitti_map": {"Pedestrian": "person"}},
                 "split": {"output": str(split)},
-                "tracklet_pool": {"output_dir": str(pool)},
                 "tracklet_synthesis": {
                     "output_dir": str(root / "out"),
+                    "pool_sources": [str(pool)],
                     "max_sequences": 1,
                     "class_ratio": {"person": 1.0},
                     "class_height_range": {
@@ -98,18 +98,7 @@ class EventPipelineIntegrationTest(unittest.TestCase):
                     "victim_max_base_occlusion": 0,
                     "max_occluders_per_victim": 2,
                     "blend_method": "none",
-                    "paste_jitter": {
-                        "mode": "real",
-                        "real": {
-                            "scenarios": ["night"],
-                            "definitions": {
-                                "night": {
-                                    "brightness": [0.4, 0.5],
-                                    "temporal_variation": 0.01,
-                                }
-                            },
-                        },
-                    },
+                    "paste_jitter": {"mode": "random", "preset": "mid"},
                 },
             }
             config_path = root / "config.yaml"
@@ -120,8 +109,7 @@ class EventPipelineIntegrationTest(unittest.TestCase):
             self.assertTrue(summary["qc_ok"])
             self.assertEqual(summary["synthetic_tracklets"], 1)
             self.assertEqual(summary["detector_bbox_policy"], "amodal_original")
-            self.assertEqual(summary["jitter_mode"], "real")
-            self.assertEqual(summary["real_jitter_scenarios"], {"night": 1})
+            self.assertEqual(summary["jitter_mode"], "random")
 
             tracks = load_json(root / "out" / "occluder_tracks.json")
             self.assertEqual(tracks[0]["category"], "person")
@@ -133,7 +121,6 @@ class EventPipelineIntegrationTest(unittest.TestCase):
             # the sampled size stays inside the class's physical range
             self.assertTrue(1.1 <= tracks[0]["height_factor"] <= 1.3)
             self.assertTrue(abs(tracks[0]["lateral_offset_fraction"]) <= 1.15)
-            self.assertEqual(tracks[0]["real_jitter_scenario"], "night")
 
             dataset = load_json(root / "out" / "annotations.json")
             # victim annotations keep the amodal (original) box as the detector bbox

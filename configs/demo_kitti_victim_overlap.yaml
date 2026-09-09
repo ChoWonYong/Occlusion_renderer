@@ -1,9 +1,0 @@
-base: phase1_kitti.yaml
-
-# One-sequence validation with a guaranteed KITTI victim overlap.
-tracklet_synthesis:
-  output_dir: ../artifacts/phase1/tracklet_victim_demo
-  max_sequences: 1
-  tracklets_per_sequence: [1, 1]
-  boundary_shift_count: 0
-  placement_mode: victim_overlap_translation

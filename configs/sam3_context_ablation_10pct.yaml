@@ -1,0 +1,5 @@
+base: sam3_context_ablation.yaml
+
+sam3_context_ablation:
+  output_dir: ../artifacts/official_split/sam3_context_ablation_10pct
+  context_padding: 0.10

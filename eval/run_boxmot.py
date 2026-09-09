@@ -75,10 +75,9 @@ def _experiment_dir_name(
     condition: str, aug: str, seed: int, paste_mode: str | None = None, tag: str | None = None
 ) -> str:
     """Must match ``train.run._experiment_name`` or the checkpoint will not be found."""
-    label = "kitti_finetuned" if condition == "kitti" else condition
     suffix = f"_{paste_mode}" if condition == "treatment" and paste_mode else ""
     tag_part = f"_{tag}" if tag else ""
-    return f"phase1_{label}{suffix}{tag_part}_{aug}_seed{seed}"
+    return f"phase1_{condition}{suffix}{tag_part}_{aug}_seed{seed}"
 
 
 def _checkpoint_path(
@@ -467,8 +466,8 @@ def run(
     worker_shard_count: int | None = None,
     worker_output: str | Path | None = None,
 ) -> dict[str, Any]:
-    if condition not in {"kitti", "baseline", "treatment"}:
-        raise ValueError("condition must be kitti, baseline, or treatment")
+    if condition not in {"baseline", "treatment"}:
+        raise ValueError("condition must be baseline or treatment")
     if model_source not in {"coco-pretrained", "finetuned"}:
         raise ValueError("model_source must be coco-pretrained or finetuned")
     if epoch not in EPOCH_CKPT:
@@ -609,9 +608,7 @@ def run(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate YOLOX-X with BoxMOT ByteTrack")
     parser.add_argument("--config", default="configs/default.yaml", type=Path)
-    parser.add_argument(
-        "--condition", choices=["kitti", "baseline", "treatment"], default="kitti"
-    )
+    parser.add_argument("--condition", choices=["baseline", "treatment"], required=True)
     parser.add_argument(
         "--model-source",
         choices=["coco-pretrained", "finetuned"],

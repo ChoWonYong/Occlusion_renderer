@@ -15,34 +15,27 @@ dependencies = [
 ]
 
 [project.scripts]
-kds-synth-a2a = "synth.pipeline:main"
-kds-kitti2coco = "data.kitti2coco:main"
+# Split definition
 kds-phase1-split = "data.split_phase1:main"
-kds-build-pool = "pool.build_pool:main"
-kds-build-kitti-sam3-pool = "pool.build_kitti_sam3_pool:main"
-kds-build-tracklets = "pool.build_tracklet_pool:main"
-kds-sam3-smoke = "scripts.sam3_smoke:main"
-kds-kitti-sam3-smoke = "scripts.kitti_sam3_smoke:main"
-kds-kitti-sam3-track-video = "scripts.kitti_sam3_track_video:main"
-kds-render-kitti-demo = "scripts.render_kitti_demo_video:main"
-kds-render-tracklet-demos = "scripts.render_tracklet_demo_videos:main"
-kds-visualize-tracklets = "scripts.visualize_tracklets:main"
-kds-synth-video = "synth.video_pipeline:main"
-kds-synth-tracklets = "synth.tracklet_pipeline:main"
+# Automatic occluder mining: Co-DETR -> ByteTrack -> SAM3 -> confidence filter
+kds-codetr-detect = "mining.codetr:main"
+kds-build-detector-tracklets = "pool.build_detector_tracklet_pool:main"
+kds-filter-detector-tracklets = "pool.filter_detector_tracklet_pool:main"
+# Occlusion synthesis and A/B dataset construction
 kds-synth-events = "synth.event_pipeline:main"
-kds-build-kitti-split = "data.build_kitti_finetune:main"
 kds-build-ab = "data.build_phase1:main"
+# Training and evaluation
 kds-train-yolox = "train.run:main"
 kds-eval-boxmot = "eval.run_boxmot:main"
 kds-aggregate = "eval.aggregate:main"
-kds-codetr-detect = "mining.codetr:main"
-kds-build-detector-tracklets = "pool.build_detector_tracklet_pool:main"
-kds-compare-tracklet-pools = "eval.compare_tracklet_pools:main"
-kds-filter-detector-tracklets = "pool.filter_detector_tracklet_pool:main"
-kds-audit-confidence-filter = "eval.audit_confidence_filter:main"
-kds-visualize-confidence-filter = "scripts.visualize_confidence_filter:main"
-kds-visualize-real-jitter = "scripts.visualize_real_jitter:main"
 kds-eval-detection-metrics = "eval.run_detection_metrics:main"
+kds-reaggregate-detection-classes = "eval.reaggregate_detection_classes:main"
+# SAM3 crop-policy comparison against KITTI MOTS
+kds-sam3-crop-policies = "eval.compare_sam3_crop_policies:main"
+kds-eval-selected-tracklet-mots = "eval.evaluate_selected_tracklet_mots:main"
+# Environment checks
+kds-preflight = "scripts.preflight:main"
+kds-prepare-pretrained = "scripts.prepare_pretrained:main"
 
 [tool.setuptools.packages.find]
-include = ["common*", "data*", "pool*", "segment*", "depth*", "synth*", "label*", "qc*", "mining*", "train*", "eval*", "scripts*"]
+include = ["common*", "data*", "pool*", "segment*", "synth*", "label*", "qc*", "mining*", "train*", "eval*", "scripts*"]

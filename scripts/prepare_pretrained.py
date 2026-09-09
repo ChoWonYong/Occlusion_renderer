@@ -12,7 +12,7 @@ YOLOX_X_COCO_URL = "https://github.com/Megvii-BaseDetection/YOLOX/releases/downl
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download the official COCO-pretrained YOLOX-X checkpoint")
-    parser.add_argument("--config", default="configs/phase1_kitti.yaml", type=Path)
+    parser.add_argument("--config", default="configs/default.yaml", type=Path)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     config, path = load_config(args.config)

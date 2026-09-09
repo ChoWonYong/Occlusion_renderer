@@ -22,12 +22,15 @@ phase4_evaluation:
   runs:
     baseline:
       label: Original KITTI train only
+      # The reported seed-0 baseline was trained before the conf60 pool existed,
+      # so its run sits under artifacts/phase1/yolox_runs. Its training set is
+      # byte-identical to yolox_data_conf60/annotations/baseline_train.json; a
+      # fresh `kds-train-yolox --config configs/default.yaml --condition baseline`
+      # writes the same model to artifacts/phase2/yolox_runs_conf60/.
       checkpoint: ../artifacts/phase1/yolox_runs/phase1_baseline_full_seed0/latest_ckpt.pth.tar
       training_data: baseline
-      real_jitter: false
     confidence_filtered:
       label: Automatic + confidence-filtered paste (random mid jitter)
       checkpoint: ../artifacts/phase2/yolox_runs_conf60/phase1_treatment_append_conf60_full_seed0/latest_ckpt.pth.tar
       training_data: baseline_plus_automatic_paste
-      real_jitter: false
 

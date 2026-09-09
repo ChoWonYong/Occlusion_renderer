@@ -14,7 +14,6 @@ from synth.paste_jitter import (
     jitter_box,
     jitter_policy_from_config,
     jitter_rgba,
-    real_policy_from_config,
     ranges_from_config,
     resolve_preset,
     sample_sequence,
@@ -114,37 +113,6 @@ class PatchJitterTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             jitter_rgba(_patch()[..., :3], FrameJitter(flip=True))
 
-    def test_rain_elasticity_changes_rgb_but_never_alpha(self) -> None:
-        patch = _patch()
-        out = jitter_rgba(
-            patch,
-            FrameJitter(
-                real_scenario="rain",
-                effect_seed=3,
-                elastic_fraction=0.5,
-                elastic_block_size=2,
-                elastic_displacement=1,
-            ),
-        )
-        np.testing.assert_array_equal(out[..., 3], patch[..., 3])
-        self.assertFalse(np.array_equal(out[..., :3], patch[..., :3]))
-
-    def test_snow_whitens_only_rgb_and_preserves_geometry(self) -> None:
-        patch = _patch()
-        out = jitter_rgba(
-            patch,
-            FrameJitter(
-                real_scenario="snow",
-                effect_seed=9,
-                snow_fraction=0.5,
-                snow_block_size=1,
-            ),
-        )
-        np.testing.assert_array_equal(out[..., 3], patch[..., 3])
-        opaque_white = np.all(out[..., :3] == 255, axis=2) & (patch[..., 3] > 0)
-        self.assertTrue(opaque_white.any())
-
-
 class PresetTest(unittest.TestCase):
     def test_off_disables_jitter(self) -> None:
         for value in (None, "off", "none", "", False):
@@ -196,56 +164,20 @@ class SampleSequenceTest(unittest.TestCase):
             self.assertTrue(ranges.scale[0] <= jitter.scale <= ranges.scale[1])
             self.assertTrue(ranges.rotation[0] <= jitter.rotation <= ranges.rotation[1])
 
+    def test_config_mode_defaults_to_random(self) -> None:
+        self.assertEqual(jitter_policy_from_config({"preset": "mid"}), PRESETS["mid"])
+
+    def test_config_mode_off_disables_jitter(self) -> None:
+        self.assertIsNone(jitter_policy_from_config({"mode": "off", "preset": "mid"}))
+
+    def test_unknown_config_mode_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            jitter_policy_from_config({"mode": "real", "preset": "mid"})
+
     def test_same_seed_reproduces_the_sequence(self) -> None:
         first = sample_sequence(PRESETS["low"], 12, random.Random(7))
         second = sample_sequence(PRESETS["low"], 12, random.Random(7))
         self.assertEqual(first, second)
-
-
-class RealJitterTest(unittest.TestCase):
-    CONFIG = {
-        "scenarios": ["day", "night", "rain", "snow"],
-        "weights": {"day": 1, "night": 1, "rain": 1, "snow": 1},
-        "definitions": {
-            "day": {"brightness": [0.95, 1.15]},
-            "night": {"brightness": [0.35, 0.55]},
-            "rain": {
-                "brightness": [0.72, 0.92],
-                "elastic_fraction": 0.012,
-                "elastic_block_size": 2,
-            },
-            "snow": {
-                "brightness": [0.82, 1.0],
-                "elastic_fraction": 0.008,
-                "snow_fraction": 0.018,
-            },
-        },
-    }
-
-    def test_default_config_mode_is_random(self) -> None:
-        policy = jitter_policy_from_config({"preset": "mid"})
-        self.assertEqual(policy, PRESETS["mid"])
-
-    def test_real_scenario_is_constant_within_an_event(self) -> None:
-        policy = real_policy_from_config(self.CONFIG)
-        sequence = sample_sequence(policy, 40, random.Random(5), scenario="night")
-        self.assertEqual({item.real_scenario for item in sequence}, {"night"})
-        self.assertTrue(all(0.0 < item.brightness < 0.6 for item in sequence))
-        self.assertGreater(len({item.brightness for item in sequence}), 30)
-
-    def test_real_sequence_is_reproducible(self) -> None:
-        policy = real_policy_from_config(self.CONFIG)
-        first = sample_sequence(policy, 12, random.Random(7), scenario="snow")
-        second = sample_sequence(policy, 12, random.Random(7), scenario="snow")
-        self.assertEqual(first, second)
-
-    def test_invalid_fraction_is_rejected(self) -> None:
-        bad = {
-            "scenarios": ["rain"],
-            "definitions": {"rain": {"elastic_fraction": 1.1}},
-        }
-        with self.assertRaises(ValueError):
-            real_policy_from_config(bad)
 
 
 class MapOccluderBoxTest(unittest.TestCase):

@@ -249,10 +249,7 @@ def run(config_file: str | Path, paste_mode: str | None = None) -> dict[str, Any
     class_map = config["classes"]["kitti_map"]
     train_source = convert_tracking_to_video_coco(kitti_root, split["train_sequences"], class_map)
     eval_source = convert_tracking_to_video_coco(kitti_root, split["eval_sequences"], class_map)
-    synthetic_root = resolve_path(
-        path.parent,
-        config["dataset"].get("synthetic_output_dir", config["synthesis"]["output_dir"]),
-    )
+    synthetic_root = resolve_path(path.parent, config["dataset"]["synthetic_output_dir"])
     synthetic = load_json(synthetic_root / "annotations.json")
     # 2026-07-23: treatment uses only frames that actually carry a pasted occluder
     # (avoids duplicating clean frames). Set dataset.synthetic_frames: all to keep
