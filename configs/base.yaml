@@ -26,7 +26,7 @@ paths:
   coco_pretrained_yolox_x: "${KDS_YOLOX_X_CHECKPOINT:-${KDS_BYTETRACK_REPO:-~/ByteTrack}/pretrained/yolox_x.pth}"
 
 classes:
-  # Contiguous ids used by the Phase-1 YOLOX head.
+  # Contiguous ids used by the YOLOX head.
   names: [car, truck, person, bicycle]
   kitti_map:
     Car: car
@@ -37,10 +37,12 @@ classes:
     Person_sitting: person
     Cyclist: bicycle
 
-# 2026-07-23: truck AND bicycle excluded from the OCCLUDER pool (KITTI data
-# scarcity: 0 truck and only 1 bicycle tracklet with a >=30-frame clean sub-run).
-# The YOLOX head stays 4-class for eval; only pasted occluders are 2-class
-# (car/person). car folds in KITTI Van via classes.*_map.
+# Pasted occluders are 2-class. This is structural, not a sampling choice: the
+# pool is mined from Co-DETR, and codetr_detector.coco_class_map folds person ->
+# person and car/bus/truck -> car, so no truck or bicycle occluder can be
+# produced (the shipped pool is 100 car / 60 person). The YOLOX head still stays
+# 4-class because eval GT contains all four; car folds in KITTI Van via
+# classes.kitti_map.
 occluder_class_dist:
   car: 0.65
   person: 0.35

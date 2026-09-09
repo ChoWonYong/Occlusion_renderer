@@ -2,9 +2,9 @@ base: default.yaml
 
 phase: phase4_detection_evaluation_random_jitter
 
-# Phase 4 intentionally evaluates the already-trained Phase-2 arm. It used the
-# automatic confidence-filtered pool and the established random/mid jitter; the
-# optional Phase-3 real jitter is not part of either checkpoint below.
+# Scores the already-trained seed-0 pair behind README section 1-1. Both
+# checkpoints below were built from the automatic confidence-filtered pool with
+# the random/mid jitter restated here, so nothing is re-synthesised.
 tracklet_synthesis:
   paste_jitter:
     mode: random

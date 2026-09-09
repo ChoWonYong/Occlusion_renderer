@@ -1,8 +1,8 @@
-"""Aggregate per-class TrackEval outputs into the fin_tuned_baseline.md table.
+"""Aggregate per-class TrackEval outputs into one comparison table.
 
 For each run, TrackEval is executed once per class (KDS_CAR/TRUCK/PERSON/BICYCLE).
-This script reads those per-class outputs and builds the combined ("전체") row the
-same way fin_tuned_baseline.md does:
+This script reads those per-class outputs and builds the combined ("전체") row
+that README section 1-1 reports:
 
 - HOTA/DetA/AssA: detection-weighted across classes at the per-alpha level. For
   each localization threshold alpha, DetA is computed from the summed TP/FN/FP
@@ -133,7 +133,7 @@ def arm_of(run_name: str) -> str:
 
 
 def _mean_std(values: list[float]) -> tuple[float, float]:
-    """Mean and *sample* standard deviation (ddof=1), matching fine_tuned_baseline.md."""
+    """Mean and *sample* standard deviation (ddof=1)."""
     mean = statistics.mean(values)
     std = statistics.stdev(values) if len(values) > 1 else 0.0
     return mean, std

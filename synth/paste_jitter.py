@@ -5,7 +5,8 @@ contrast, sharpness, horizontal flip, scale and rotation — instead of the crop
 being composited verbatim. The synthetic frames train the *detector* only
 (ByteTrack is never trained on them), so a jitter that changes frame to frame
 costs no temporal realism the training actually uses, and it stops the detector
-from memorising the ~62 pool identities pixel for pixel.
+from memorising the pool pixel for pixel — the default confidence-filtered pool
+is only 160 tracklets drawn from 158 distinct identities.
 
 Three of the seven change the alpha mask, and therefore rho:
 
@@ -82,10 +83,16 @@ PRESETS: dict[str, JitterRanges] = {
     ),
 }
 
-# Measured on KITTI eval, ep60, 3 seeds, HOTA against the same pipeline with
-# jitter off (55.78 +- 0.38): low 56.20 +- 0.34, mid 56.69 +- 0.15. The gain is
-# monotone in strength so far, which is why "high" exists — and why "mid" is the
-# configured default.
+# Why "mid" is the configured default. Measured on KITTI eval, ep60, 3 seeds,
+# 2-class HOTA: jitter off 55.78 +- 0.38 -> low 56.20 +- 0.34 -> mid 56.69 +- 0.15.
+# The gain was monotone in strength as far as it was measured, which is why
+# "high" exists as an option.
+#
+# Provenance: that sweep predates the pipeline README section 1-1 reports. It ran
+# on the `replace` paste mode over the GT-derived pool, before the Co-DETR /
+# confidence-0.60 pool existed, and its configs are no longer in the repo — so
+# the numbers justify the default but are not reproducible from this tree, and
+# they are not comparable with the README's baseline/treatment tables.
 
 
 

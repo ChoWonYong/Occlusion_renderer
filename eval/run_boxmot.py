@@ -28,11 +28,18 @@ COCO_TO_PROJECT_CLASS = {
 }
 
 
-# Checkpoint file for each saved epoch. ep60 = final EMA weights; ep50 = the
-# last-mosaic-epoch snapshot the trainer saves at the no_aug boundary (epoch 50).
+# Both files hold EMA weights (ByteTrack's exp sets ema=True, and save_ckpt dumps
+# the shadow model). They differ only in when the trainer writes them:
+#   ep60 - after_epoch of the last epoch, i.e. all 60 epochs trained.
+#   ep59 - before_epoch, every epoch from the no_aug boundary on. With
+#          strict_no_aug_boundary and no_aug_epochs=10 that is epoch index 50..59,
+#          each overwriting the last, so the surviving file is the one written
+#          before epoch index 59 - 59 epochs trained, not 50. The stored
+#          start_epoch is 60 for both, which is why the file name misleads.
+# Only ep60 backs a reported number; ep59 is a diagnostic.
 EPOCH_CKPT = {
     "ep60": "latest_ckpt.pth.tar",
-    "ep50": "last_mosaic_epoch_ckpt.pth.tar",
+    "ep59": "last_mosaic_epoch_ckpt.pth.tar",
 }
 
 
@@ -616,7 +623,8 @@ def main() -> None:
     )
     # Taken from train.run so a new aug level cannot become unevaluatable.
     parser.add_argument("--aug", choices=sorted(AUG_LEVELS), default="full")
-    parser.add_argument("--epoch", choices=["ep50", "ep60"], default="ep60")
+    # Derived from EPOCH_CKPT so a renamed checkpoint cannot leave a stale choice.
+    parser.add_argument("--epoch", choices=sorted(EPOCH_CKPT), default="ep60")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--paste-mode",

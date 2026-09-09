@@ -26,12 +26,14 @@ tracklet_synthesis:
   peak_rho_max: 0.90
   event_gate_floor: 0.20             # below this the event is not worth rendering
   # rho is the fraction of the victim box covered by the occluder's real mask,
-  # via a per-frame integral image. The old bbox proxy over-stated it by
-  # 0.40-0.72x depending on occluder class, confounding occlusion strength with
-  # occluder class.
+  # via a per-frame integral image. Against the old bbox proxy the mask-based rho
+  # comes out at only 0.40-0.72x the proxy value, and by how much depends on the
+  # occluder class (KITTI car 0.72, MOT17 person 0.59, KITTI person 0.40) — so
+  # the proxy over-stated occlusion, and did so unevenly, confounding occlusion
+  # strength with occluder class.
   rho_method: occluder_mask_integral
-  # truck and bicycle are excluded from the occluder pool (KITTI data scarcity);
-  # the detector head still stays 4-class.
+  # car/person only: the pool is mined from Co-DETR, whose class map cannot emit
+  # a truck or bicycle occluder. The detector head still stays 4-class.
   class_ratio: {car: 0.65, person: 0.35}
   victim_detector_bbox_policy: amodal_original
   # Occluder target height = victim_height * factor[occluder]/factor[victim], the

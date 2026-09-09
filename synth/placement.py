@@ -20,7 +20,9 @@ acceptance gate.
 - Rho is measured on the *rendered* occluder mask through a per-frame integral
   image. The victim's amodal mask is a filled rectangle (``bbox_to_mask``), so a
   rectangle query is exact and costs the same O(1) as the old bounding-box
-  proxy. That proxy over-stated rho by 0.40-0.72x depending on occluder class,
+  proxy. Measured against that proxy, the mask-based rho is only 0.40-0.72x the
+  proxy value (KITTI car 0.72, MOT17 person 0.59, KITTI person 0.40): the proxy
+  over-stated occlusion, by a factor that itself varied with occluder class,
   which made the configured band distribution unachievable in rendered terms.
 
 Class-pair asymmetries in the resulting difficulty (a pedestrian cannot heavily

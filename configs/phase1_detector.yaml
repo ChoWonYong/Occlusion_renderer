@@ -38,9 +38,9 @@ detector_tracklet_pool:
   sam3_min_detector_iou: 0.3
   device: cuda
   sam3_precision: auto
-  # Phase 1 records these signals but does not filter on them yet, so the raw
-  # detector-induced quality drop can be measured. Phase 2 will gate per frame,
-  # then keep the longest passing run; identity purity is not a gate.
+  # This layer records the quality signals but does not filter on them, so the
+  # raw detector-induced quality drop stays measurable. phase2_detector_conf.yaml
+  # turns the gate on; identity purity is never a gate.
   quality_filter:
     enabled: false
     primary_goal: clear_unoccluded_frames
@@ -48,7 +48,8 @@ detector_tracklet_pool:
 
 tracklet_synthesis:
   output_dir: ../artifacts/phase1/tracklet_synthetic_detector
-  # Prevent accidental mixing with the old GT-derived MOT17/KITTI pools.
+  # synth.event_pipeline requires pool_sources, so the pool a run synthesises
+  # from is always stated rather than discovered.
   pool_sources:
     - ../artifacts/phase1/codetr_sam3_tracklets
 

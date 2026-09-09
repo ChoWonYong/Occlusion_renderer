@@ -9,6 +9,7 @@ weights/
 visualizations/
 
 .claude/
+.codex/
 
 third_party/
 .conda/
