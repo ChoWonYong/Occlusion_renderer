@@ -133,6 +133,16 @@ Co-DETR(Python 3.8 / PyTorch 1.11 / MMCV 1.5.0)와 SAM3(Python 3.12 / PyTorch cu
 
 ### COCO-pretrained YOLOX-X
 
+[YOLOX](https://github.com/Megvii-BaseDetection/YOLOX)
+(Megvii-BaseDetection, Apache-2.0)가 공개한 COCO-pretrained `yolox_x.pth`에서 학습 시작, fine-tuning의
+초기값으로만 사용합니다. 파일을 `$KDS_BYTETRACK_REPO/pretrained/`에 두는 것은
+[ByteTrack](https://github.com/FoundationVision/ByteTrack)(Yifu Zhang, MIT)의 관례를
+따른 것입니다.
+
+보고된 모든 run이 출발한 파일은 YOLOX
+[0.1.1rc0 release](https://github.com/Megvii-BaseDetection/YOLOX/releases/tag/0.1.1rc0) asset
+(md5 `c58e4a3a710e3a464bf472aaf6f4891a`)이고, 아래 명령이 그 파일을 받아 md5까지 검증합니다.
+
 ```bash
 kds-prepare-pretrained          # $KDS_BYTETRACK_REPO/pretrained/yolox_x.pth
 ```
@@ -141,34 +151,107 @@ kds-prepare-pretrained          # $KDS_BYTETRACK_REPO/pretrained/yolox_x.pth
 
 ## 3. 데이터와 경로
 
-[`configs/base.yaml`](configs/base.yaml)의 `paths.*`가 모든 경로의 기준입니다. 저장소 밖의
-데이터셋과 외부 checkout은 환경변수로 덮어씁니다.
+데이터셋 세 가지가 필요합니다. 기본값은 모두 저장소 안 `datasets/` 아래이고, 다른 곳에
+두었다면 §3-3의 환경변수로 덮어쓰면 됩니다.
 
-| 환경변수 | 용도 | 기본값 |
-|---|---|---|
-| `KDS_MOT17` | MOT17 train (FRCNN view만 사용) | `~/tmp_SwapPatch/data/MOT17` |
-| `KDS_BYTETRACK_REPO` | ByteTrack/YOLOX checkout | `~/ByteTrack` |
-| `KDS_BOXMOT_REPO` | BoxMOT checkout | `~/boxmot` |
-| `KDS_TRACKEVAL_REPO` | TrackEval checkout | `~/BankTweak/TrackEval` |
-| `KDS_YOLOX_X_CHECKPOINT` | COCO-pretrained YOLOX-X | `$KDS_BYTETRACK_REPO/pretrained/yolox_x.pth` |
+| 데이터셋 | 쓰이는 곳 | 내려받을 용량 |
+|---|---|---:|
+| KITTI Tracking (left color images + training labels) | §1-1 학습·평가 전체, occluder 추출 | 약 15 GB |
+| MOT17 | occluder pool 보강 (train의 FRCNN view만) | 약 5.5 GB |
+| KITTI MOTS instances | §1-2 tracklet 품질 채점 전용 | 약 22 MB |
 
-저장소 안에 두는 것:
+§1-1만 재현한다면 KITTI Tracking과 MOT17 둘이면 되고, MOTS는 §1-2에만 필요합니다.
 
-```text
-datasets/KITTI/training/{image_02,label_02}   # KITTI Tracking training
-datasets/MOTS_KITTI/instances                 # KITTI MOTS GT (§1-2 전용)
-third_party/Co-DETR                           # Co-DETR 소스
-third_party/sam3                              # SAM3 소스
-weights/codetr/pytorch_model.pth              # Co-DETR ViT-L
-weights/sam3/sam3.pt                          # SAM3
+### 3-1. 내려받기
+
+아래 명령은 모두 저장소 루트에서 실행한다고 가정합니다 (`REPO=/path/to/Occlusion_renderer`).
+
+**KITTI Tracking** — [KITTI 데이터셋 홈](https://www.cvlibs.net/datasets/kitti/)의
+[tracking benchmark](https://www.cvlibs.net/datasets/kitti/eval_tracking.php) 페이지에서
+*"Download left color images of tracking data set"* 와 *"Download training labels of tracking
+data set"* 두 개만 받으면 됩니다. 브라우저 대신 직접 받으려면:
+
+```bash
+mkdir -p "$REPO/datasets/KITTI" && cd "$REPO/datasets/KITTI"
+curl -LO https://s3.eu-central-1.amazonaws.com/avg-kitti/data_tracking_image_2.zip
+curl -LO https://s3.eu-central-1.amazonaws.com/avg-kitti/data_tracking_label_2.zip
+unzip -q data_tracking_image_2.zip    # -> training/image_02, testing/image_02
+unzip -q data_tracking_label_2.zip    # -> training/label_02
 ```
 
-준비가 끝나면 해석된 경로를 먼저 점검합니다.
+라벨이 공개된 `training/`의 21개 시퀀스(`0000`~`0020`)만 씁니다. 이를 train/eval로 나눈 것이
+§1-1과 §1-2의 split이며, `testing/`은 전혀 쓰지 않으므로 지워도 됩니다.
+
+**MOT17** — [MOTChallenge](https://motchallenge.net/)의 MOT17 배포본입니다.
+
+```bash
+cd "$REPO/datasets"
+curl -LO https://motchallenge.net/data/MOT17.zip
+unzip -q MOT17.zip                    # -> MOT17/train, MOT17/test
+```
+
+압축을 푼 결과가 `datasets/MOT17/train/MOT17-02-FRCNN/...` 형태여야 합니다. `train/`이 바로
+나왔다면 `datasets/MOT17/` 아래로 옮기십시오. 이 파이프라인은 MOT17의 GT를 읽지 않고
+`train/MOT17-*-FRCNN/img1`의 프레임만 30 fps → 10 fps로 재샘플해 occluder 후보로 씁니다.
+프레임 간격과 확장자를 각 시퀀스의 `seqinfo.ini`에서 읽으므로 폴더 구조를 그대로 두십시오.
+
+**KITTI MOTS** (§1-2 전용) — KITTI 이미지 위에 segmentation 주석을 얹은 별도 배포본으로,
+RWTH Aachen [MOTS 페이지](https://www.vision.rwth-aachen.de/page/mots)에서 받습니다.
+
+```bash
+mkdir -p "$REPO/datasets/MOTS_KITTI" && cd "$REPO/datasets/MOTS_KITTI"
+curl -LO https://www.vision.rwth-aachen.de/media/resource_files/instances.zip
+unzip -q instances.zip                # -> instances/0000/000000.png ...
+```
+
+이미지는 위에서 받은 KITTI Tracking 것을 그대로 쓰므로 주석(`instances/`)만 있으면 됩니다.
+MOTS 주석은 CC BY-NC-SA 3.0이며 Voigtlaender et al., *MOTS* (CVPR 2019)와 Geiger et al.,
+*KITTI* (CVPR 2012) 인용을 요구합니다. KITTI 본체 역시 비상업적 사용 조건이므로 각 배포처의
+약관을 확인하십시오.
+
+### 3-2. 최종 배치
+
+```text
+datasets/
+  KITTI/training/image_02/{0000..0020}/*.png     # KITTI Tracking 이미지
+  KITTI/training/label_02/{0000..0020}.txt       # KITTI Tracking 라벨
+  MOT17/train/MOT17-XX-FRCNN/{img1/, seqinfo.ini}
+  MOTS_KITTI/instances/{0000..0020}/*.png        # §1-2 전용
+third_party/Co-DETR                              # Co-DETR 소스
+third_party/sam3                                 # SAM3 소스
+weights/codetr/pytorch_model.pth                 # Co-DETR ViT-L
+weights/sam3/sam3.pt                             # SAM3
+```
+
+준비가 끝나면 해석된 경로를 먼저 점검합니다. 빠진 파일이 있으면 그 자리에서 알려 줍니다.
 
 ```bash
 kds-preflight --config configs/default.yaml
-kds-preflight --config configs/sam3_context_ablation.yaml   # MOTS GT까지 확인
+kds-preflight --config configs/sam3_context_ablation.yaml   # MOTS 주석까지 확인
 ```
+
+### 3-3. 다른 위치에 둔 경우
+
+[`configs/base.yaml`](configs/base.yaml)의 `paths.*`가 모든 경로의 기준이고, 아래 환경변수로
+파일을 옮기지 않고 덮어쓸 수 있습니다.
+
+| 환경변수 | 용도 | 기본값 |
+|---|---|---|
+| `KDS_KITTI` | KITTI Tracking 루트 | `datasets/KITTI` |
+| `KDS_MOT17` | MOT17 루트 | `datasets/MOT17` |
+| `KDS_BYTETRACK_REPO` | ByteTrack/YOLOX checkout | `~/ByteTrack` |
+| `KDS_BOXMOT_REPO` | BoxMOT checkout | `~/boxmot` |
+| `KDS_TRACKEVAL_REPO` | TrackEval checkout | `~/TrackEval` |
+| `KDS_YOLOX_X_CHECKPOINT` | COCO-pretrained YOLOX-X | `$KDS_BYTETRACK_REPO/pretrained/yolox_x.pth` |
+
+```bash
+export KDS_KITTI=/mnt/datasets/KITTI
+export KDS_MOT17=/mnt/datasets/MOT17
+```
+
+KITTI MOTS 주석 경로만 환경변수가 아니라
+[`configs/sam3_context_ablation.yaml`](configs/sam3_context_ablation.yaml)의
+`sam3_context_ablation.mots_root`에서 지정합니다.
 
 ### 설정 파일 체인
 
@@ -189,9 +272,7 @@ base.yaml                 경로 · 클래스 · GPU 예산
 
 ## 4. 재현
 
-GPU 개수는 계정 전체 6개, 한 명령 4개로 [`configs/base.yaml`](configs/base.yaml)의
-`resources`가 제한합니다. `CUDA_VISIBLE_DEVICES`의 개수와 `--workers`는 일치해야 하고,
-초과하는 실행은 시작 전에 실패합니다. 아래 예시의 GPU 번호는 실제 유휴 GPU로 바꾸십시오.
+아래 예시의 GPU 번호는 실제 유휴 GPU로 바꾸십시오.
 
 ### 4-1. Detector / Tracker 결과 (§1-1)
 
@@ -302,3 +383,20 @@ bash scripts/run_sam3_crop_policy_ablation.sh
 source scripts/activate_kds.sh
 python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
+
+---
+
+## 6. 외부 자산과 라이선스
+
+이 저장소의 코드 외에 아래 데이터·모델·라이브러리를 그대로 가져다 씁니다. 어느 것도 여기서
+재배포하지 않고 §2·§3의 안내대로 각 배포처에서 직접 받도록 합니다.
+
+| 자산 | 이 파이프라인에서의 역할 | 라이선스 |
+|---|---|---|
+| [KITTI Tracking](https://www.cvlibs.net/datasets/kitti/) 이미지·라벨 | 학습·평가 데이터, occluder 추출 원본 | CC BY-NC-SA 3.0 · Geiger et al., CVPR 2012 |
+| [KITTI MOTS](https://www.vision.rwth-aachen.de/page/mots) `instances` | §1-2 mask 품질 채점 | CC BY-NC-SA 3.0 · Voigtlaender et al., CVPR 2019 |
+| [MOT17](https://motchallenge.net/) | occluder pool 보강 (FRCNN view) | MOTChallenge 배포 조건 · Milan et al., 2016 |
+| [YOLOX](https://github.com/Megvii-BaseDetection/YOLOX) `yolox_x.pth` | fine-tuning 초기 가중치 | Apache-2.0 · Megvii |
+| [ByteTrack](https://github.com/FoundationVision/ByteTrack) · [TrackEval](https://github.com/JonathonLuiten/TrackEval) · [Co-DETR](https://github.com/Sense-X/Co-DETR) | YOLOX 학습 하네스 · HOTA/CLEAR 평가 · detector | MIT |
+| [BoxMOT](https://github.com/mikel-brostrom/boxmot) | ByteTrack association 구현 (pool 생성·tracking 평가) | **AGPL-3.0** |
+| [SAM3](https://github.com/facebookresearch/sam3) | occluder mask 분할 | Meta SAM License |

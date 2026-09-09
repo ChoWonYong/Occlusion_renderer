@@ -27,23 +27,29 @@ def run(config_file: str | Path) -> dict[str, Any]:
     sam3_python = config_path(config, path, "paths", "sam3_python")
     add("SAM3 Python", sam3_python.is_file(), str(sam3_python), True)
     if sam3_python.is_file():
-        runtime = subprocess.run(
-            [
-                str(sam3_python),
-                "-c",
-                (
-                    "import sys,torch,sam3; "
-                    "print(f'python={sys.version_info.major}.{sys.version_info.minor} '"
-                    "f'torch={torch.__version__} cuda={torch.cuda.is_available()}')"
-                ),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        detail = (runtime.stdout or runtime.stderr).strip()
-        add("SAM3 runtime", runtime.returncode == 0 and "cuda=True" in detail, detail, True)
+        # Importing torch + sam3 cold can take a while; a slow probe is reported
+        # as one failed check rather than aborting the whole report.
+        try:
+            runtime = subprocess.run(
+                [
+                    str(sam3_python),
+                    "-c",
+                    (
+                        "import sys,torch,sam3; "
+                        "print(f'python={sys.version_info.major}.{sys.version_info.minor} '"
+                        "f'torch={torch.__version__} cuda={torch.cuda.is_available()}')"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            add("SAM3 runtime", False, "import timed out after 180s", True)
+        else:
+            detail = (runtime.stdout or runtime.stderr).strip()
+            add("SAM3 runtime", runtime.returncode == 0 and "cuda=True" in detail, detail, True)
 
     path_checks = [
         ("ByteTrack repo", config_path(config, path, "paths", "bytetrack_repo"), True),

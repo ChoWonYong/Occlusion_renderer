@@ -1,14 +1,15 @@
 seed: 0
 
 # Relative entries resolve against this file's directory (common/config.py
-# resolve_path). Entries that must live outside the repo — external checkouts and
-# datasets — read `${VAR:-fallback}`, so a new machine sets the env var instead of
-# editing this file. The fallbacks assume everything sits next to the home dir.
+# resolve_path). Datasets default to `datasets/` inside the repo; external
+# checkouts default next to the home dir. Both read `${VAR:-fallback}`, so a
+# machine that parks them elsewhere exports the env var instead of editing this
+# file. README section 3 lists what to download into each location.
 paths:
   project_root: ..
   artifacts: ../artifacts
-  kitti_tracking: ../datasets/KITTI
-  mot17: "${KDS_MOT17:-~/tmp_SwapPatch/data/MOT17}"
+  kitti_tracking: "${KDS_KITTI:-../datasets/KITTI}"
+  mot17: "${KDS_MOT17:-../datasets/MOT17}"
   sam3_python: ../.conda-envs/kds-sam3/bin/python
   sam3_repo: ../third_party/sam3
   sam3_checkpoint: ../weights/sam3/sam3.pt
@@ -20,7 +21,7 @@ paths:
   codetr_checkpoint: ../weights/codetr/pytorch_model.pth
   bytetrack_repo: "${KDS_BYTETRACK_REPO:-~/ByteTrack}"
   boxmot_repo: "${KDS_BOXMOT_REPO:-~/boxmot}"
-  trackeval_repo: "${KDS_TRACKEVAL_REPO:-~/BankTweak/TrackEval}"
+  trackeval_repo: "${KDS_TRACKEVAL_REPO:-~/TrackEval}"
   # Follows bytetrack_repo unless the checkpoint is parked somewhere else.
   coco_pretrained_yolox_x: "${KDS_YOLOX_X_CHECKPOINT:-${KDS_BYTETRACK_REPO:-~/ByteTrack}/pretrained/yolox_x.pth}"
 
