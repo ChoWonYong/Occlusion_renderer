@@ -1,24 +1,5 @@
 # Occlusion Renderer
 
-## Making DEMO
-
-[DEMO source](https://drive.google.com/file/d/1GOwwfLCQGObRzSRQRyBx_3shXgajgx9y/view?usp=drive_link)
-**KDS 대회 당일 호텔 수성 앞에서 휴대폰으로 직접 찍은 non labeled 영상입니다.**
-
-아래 환경·데이터 준비 절차에 따라 `kds-sam3`, SAM3 가중치, KITTI Tracking 이미지와
-라벨을 준비한 뒤 저장소 루트에서 실행합니다.
-```bash
-CUDA_VISIBLE_DEVICES=0 .conda-envs/kds-sam3/bin/python making_demo/make_demo.py
-```
-
-make_demo 파일 실행 시, DEMO source 영상 다운로드 → SAM3 `person` 프롬프트로 10fps 사람 tracklet 추출 → KITTI 합성을
-한 번에 실행합니다. `making_demo/visualization_tmp/`에 합성(`*_pasted.mp4`)과 대응
-원본(`*_original.mp4`) **1쌍**을 저장합니다.
-각 영상은 객체 하나만 paste하며 tracklet 시작~끝 구간만 담습니다.
-GPU는 SAM3 추출에 필요합니다. 다운로드 영상과 `making_demo/work/`의 추출 결과는
-재실행 시 재사용하며, 삭제하면 다시 생성합니다.
-
----
 
 KITTI Tracking 학습 프레임에 **시간적으로 연속된 car/person occluder를 합성**해
 detector와 tracker의 가림(occlusion) 강건성을 높이는 파이프라인입니다.
